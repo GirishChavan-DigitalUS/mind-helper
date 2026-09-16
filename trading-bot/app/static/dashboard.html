@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Auto-Trader Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel-2: #1c2330; --border: #30363d;
+    --text: #e6edf3; --muted: #9198a1; --accent: #58a6ff;
+    --green: #3fb950; --amber: #d29922; --red: #f85149; --purple: #bc8cff; --cyan: #56d4dd;
+    --mono: "SF Mono","Cascadia Code","Fira Code",Consolas,monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 14px 22px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg,#141b26,var(--bg)); position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 1.05rem; margin: 0; letter-spacing: -.3px; }
+  .badge { font-family: var(--mono); font-size: .72rem; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); }
+  .badge.dry { color: var(--amber); background: rgba(210,153,34,.12); }
+  .badge.live { color: var(--red); background: rgba(248,81,73,.12); }
+  .badge.acct { color: var(--muted); }
+  .badge.dot { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  .dot i { width: 8px; height: 8px; border-radius: 50%; background: var(--red); display: inline-block; }
+  .dot.on i { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .spacer { flex: 1; }
+  #updated { font-size: .72rem; color: var(--muted); font-family: var(--mono); }
+
+  main { max-width: 1280px; margin: 0 auto; padding: 20px 22px 60px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .stat .label { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .stat .val { font-size: 1.5rem; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .stat .sub { font-size: .72rem; color: var(--muted); margin-top: 2px; }
+
+  section { margin-bottom: 28px; }
+  h2 { font-size: .95rem; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; color: var(--text); }
+  h2 .count { font-family: var(--mono); font-size: .72rem; color: var(--muted); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+
+  .tablewrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { font-size: .7rem; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); background: var(--panel-2); }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(88,166,255,.05); }
+  td.mono, th.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .empty { padding: 22px 16px; text-align: center; color: var(--muted); font-size: .85rem; }
+
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .flat { color: var(--muted); }
+  .tag { font-family: var(--mono); font-size: .68rem; padding: 1px 7px; border-radius: 4px; border: 1px solid var(--border); }
+  .tag.call { color: var(--green); background: rgba(63,185,80,.1); }
+  .tag.put { color: var(--red); background: rgba(248,81,73,.1); }
+  .tag.ok { color: var(--green); background: rgba(63,185,80,.1); }
+  .tag.rej { color: var(--amber); background: rgba(210,153,34,.1); }
+  .bar { height: 5px; border-radius: 3px; background: var(--panel-2); overflow: hidden; min-width: 70px; }
+  .bar > span { display: block; height: 100%; }
+  .muted { color: var(--muted); }
+  .err { color: var(--red); font-size: .8rem; }
+
+  tr.pos-row { cursor: pointer; }
+  tr.pos-row td:first-child::before { content: '▸'; color: var(--muted); margin-right: 6px; font-size: .7rem; }
+  tr.pos-row.open td:first-child::before { content: '▾'; }
+  tr.detail > td { background: var(--panel-2); padding: 0; }
+  .detail-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 10px; padding: 14px 16px; }
+  .lvl { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .lvl .k { font-size: .68rem; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .lvl .v { font-family: var(--mono); font-size: .95rem; margin-top: 3px; }
+  .lvl .s { font-size: .68rem; margin-top: 3px; }
+  .lvl.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px rgba(88,166,255,.35); }
+  .done { color: var(--green); } .pend { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ Auto-Trader</h1>
+  <span id="mode" class="badge dry">DRY-RUN</span>
+  <span id="acct" class="badge acct">account: —</span>
+  <span id="conn" class="badge dot"><i></i> <span>connecting…</span></span>
+  <span class="spacer"></span>
+  <span id="refresh" class="badge dot">refresh in —</span>
+  <span id="updated">—</span>
+</header>
+
+<main>
+  <div class="cards" id="cards"></div>
+
+  <section>
+    <h2>Open Positions <span class="count" id="c-open">0</span></h2>
+    <div class="tablewrap">
+      <table id="t-open">
+        <thead><tr>
+          <th>Symbol</th><th>Side</th><th>Contract</th><th class="mono">Basis</th>
+          <th class="mono">Mark</th><th class="mono">Open</th><th class="mono">Unreal $</th>
+          <th class="mono">Unreal %</th><th class="mono">Realized $</th><th>Stage</th><th>Signal</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Recent Alerts <span class="count" id="c-alerts">0</span></h2>
+    <div class="tablewrap">
+      <table id="t-alerts">
+        <thead><tr>
+          <th>Time</th><th>Ticker</th><th>Side</th><th>Signal</th>
+          <th class="mono">Price</th><th>Result</th><th>Reason</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Closed Trades <span class="count" id="c-closed">0</span></h2>
+    <div class="tablewrap">
+      <table id="t-closed">
+        <thead><tr>
+          <th>Closed</th><th>Symbol</th><th>Side</th><th>Contract</th>
+          <th class="mono">Basis</th><th class="mono">Qty</th>
+          <th class="mono">Realized $</th><th>Signal</th><th>Exits</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="err" id="err"></p>
+</main>
+
+<script>
+const POLL_MS = 3000;
+const money = n => (n<0?'-':'')+'$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const pct = n => (n>0?'+':'')+n.toFixed(1)+'%';
+const cls = n => n>0?'pos':(n<0?'neg':'flat');
+const tstr = iso => { try { return new Date(iso).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return iso||'—'; } };
+const maskAcct = id => (!id || id.length <= 8) ? (id||'—') : id.slice(0,4)+'…'+id.slice(-4);
+
+let EXITP = {};                 // exit params (SL/TP config) from /api/state
+let LAST_POS = [];              // last open positions payload (for re-render on expand)
+const EXPANDED = new Set();     // underlyings whose detail row is open
+let nextTickAt = Date.now() + POLL_MS;
+
+function stage(p){
+  if (p.tp2_done) return 'TP2 · runner';
+  if (p.tp1_done) return 'TP1 · trailing';
+  if (p.be_armed) return 'breakeven armed';
+  return 'initial stop';
+}
+
+function setConn(ok){
+  const el = document.getElementById('conn');
+  el.className = 'badge dot' + (ok?' on':'');
+  el.querySelector('span').textContent = ok ? 'live' : 'disconnected';
+}
+
+function renderCards(s){
+  const c = document.getElementById('cards');
+  const total = (s.unrealized_pnl||0) + (s.closed_realized_pnl||0);
+  const wr = (s.wins+s.losses) ? Math.round(s.wins/(s.wins+s.losses)*100) : 0;
+  c.innerHTML = [
+    ['Open Positions', s.open_count, '', ''],
+    ['Unrealized P&L', money(s.unrealized_pnl), cls(s.unrealized_pnl), 'open marks'],
+    ['Daily P&L', money(s.daily_pnl), cls(s.daily_pnl), 'realized today'],
+    ['Closed Realized', money(s.closed_realized_pnl), cls(s.closed_realized_pnl), s.closed_count+' trades'],
+    ['Total P&L', money(total), cls(total), 'unreal + closed'],
+    ['Win Rate', wr+'%', '', s.wins+'W / '+s.losses+'L'],
+  ].map(([label,val,vc,sub]) =>
+    `<div class="stat"><div class="label">${label}</div>
+     <div class="val ${vc||''}">${val}</div><div class="sub">${sub||'&nbsp;'}</div></div>`
+  ).join('');
+}
+
+function renderOpen(list){
+  LAST_POS = list;
+  document.getElementById('c-open').textContent = list.length;
+  const tb = document.querySelector('#t-open tbody');
+  if(!list.length){ tb.innerHTML = `<tr><td colspan="11" class="empty">No open positions</td></tr>`; return; }
+  tb.innerHTML = list.map(p=>{
+    const filled = p.contracts_total ? (1 - p.contracts_open/p.contracts_total)*100 : 0;
+    const barColor = p.unrealized_pnl>=0 ? 'var(--green)':'var(--red)';
+    const open = EXPANDED.has(p.underlying);
+    const row = `<tr class="pos-row${open?' open':''}" data-sym="${p.underlying}">
+      <td><b>${p.underlying}</b></td>
+      <td><span class="tag ${p.action.toLowerCase()}">${p.action}</span></td>
+      <td class="mono muted">${p.strike} ${p.expiry.slice(5)}</td>
+      <td class="mono">${p.basis.toFixed(2)}</td>
+      <td class="mono">${(p.last_mark||0).toFixed(2)}</td>
+      <td class="mono">${p.contracts_open}/${p.contracts_total}</td>
+      <td class="mono ${cls(p.unrealized_pnl)}">${money(p.unrealized_pnl)}</td>
+      <td class="mono ${cls(p.unrealized_pct)}">${pct(p.unrealized_pct)}</td>
+      <td class="mono ${cls(p.realized_pnl)}">${money(p.realized_pnl)}</td>
+      <td>${stage(p)}<div class="bar"><span style="width:${filled}%;background:${barColor}"></span></div></td>
+      <td class="muted">${p.signal||'—'}</td>
+    </tr>`;
+    const detail = open ? `<tr class="detail"><td colspan="11">${detailHTML(p)}</td></tr>` : '';
+    return row + detail;
+  }).join('');
+}
+
+function detailHTML(p){
+  const e = EXITP || {};
+  const b = p.basis || 0;
+  const num = (k,d) => (e[k]!==undefined && e[k]!==null) ? +e[k] : d;
+  const sl = num('stop_loss_pct',20), be = num('breakeven_trigger_pct',20);
+  const t1 = num('tp1_pct',30), t1c = num('tp1_contracts',4);
+  const t2 = num('tp2_pct',50), t2c = num('tp2_contracts',4);
+  const tr = num('trailing_pct',10), run = num('runner_contracts',2);
+  const initial = !p.be_armed && !p.tp1_done && !p.tp2_done;
+  const trailingActive = p.tp1_done;                 // trailing arms after TP1
+  const beActive = p.be_armed && !p.tp1_done;
+  const trailStop = p.peak ? p.peak*(1 - tr/100) : 0;
+  const card = (k,v,s,active) =>
+    `<div class="lvl${active?' active':''}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`;
+  return `<div class="detail-grid">
+    ${card('Stop-loss', '$'+(b*(1-sl/100)).toFixed(2), `-${sl}% from basis $${b.toFixed(2)}`, initial)}
+    ${card('Breakeven', '$'+b.toFixed(2), p.be_armed?'<span class="done">armed → stop @ basis</span>':`arms at +${be}%`, beActive)}
+    ${card('TP1', '$'+(b*(1+t1/100)).toFixed(2), p.tp1_done?`<span class="done">done · sold ${t1c}</span>`:`<span class="pend">+${t1}% · sell ${t1c}</span>`, false)}
+    ${card('TP2', '$'+(b*(1+t2/100)).toFixed(2), p.tp2_done?`<span class="done">done · sold ${t2c}</span>`:`<span class="pend">+${t2}% · sell ${t2c}</span>`, false)}
+    ${card('Trailing stop', trailingActive?('$'+trailStop.toFixed(2)):'—', trailingActive?`-${tr}% off peak $${(p.peak||0).toFixed(2)}`:`arms after TP1 (-${tr}% off peak)`, trailingActive)}
+    ${card('Runners', run+' contracts', `held after TP2 · open ${p.contracts_open}/${p.contracts_total}`, false)}
+  </div>`;
+}
+
+function renderAlerts(list){
+  document.getElementById('c-alerts').textContent = list.length;
+  const tb = document.querySelector('#t-alerts tbody');
+  if(!list.length){ tb.innerHTML = `<tr><td colspan="7" class="empty">No alerts received yet</td></tr>`; return; }
+  tb.innerHTML = list.slice(0,30).map(a=>`<tr>
+      <td class="mono muted">${tstr(a.received_at)}</td>
+      <td><b>${a.ticker}</b></td>
+      <td><span class="tag ${(a.action||'').toLowerCase()}">${a.action}</span></td>
+      <td class="muted">${a.signal||'—'}</td>
+      <td class="mono">${(a.price||0).toFixed(2)}</td>
+      <td><span class="tag ${a.accepted?'ok':'rej'}">${a.accepted?'ENTERED':'SKIPPED'}</span></td>
+      <td class="muted">${a.reason||''}</td>
+    </tr>`).join('');
+}
+
+function renderClosed(list){
+  document.getElementById('c-closed').textContent = list.length;
+  const tb = document.querySelector('#t-closed tbody');
+  if(!list.length){ tb.innerHTML = `<tr><td colspan="9" class="empty">No closed trades yet</td></tr>`; return; }
+  tb.innerHTML = list.slice(0,50).map(t=>{
+    const exits = (t.exits||[]).map(e=>`${e.qty}@${e.price} (${e.reason})`).join(' · ');
+    return `<tr>
+      <td class="mono muted">${tstr(t.closed_at)}</td>
+      <td><b>${t.underlying}</b></td>
+      <td><span class="tag ${(t.action||'').toLowerCase()}">${t.action}</span></td>
+      <td class="mono muted">${t.strike} ${(''+t.expiry).slice(5)}</td>
+      <td class="mono">${(t.basis||0).toFixed(2)}</td>
+      <td class="mono">${t.contracts_total}</td>
+      <td class="mono ${cls(t.realized_pnl)}">${money(t.realized_pnl)}</td>
+      <td class="muted">${t.signal||'—'}</td>
+      <td class="muted" style="white-space:normal">${exits||'—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function tick(){
+  try {
+    const r = await fetch('/api/state', {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d = await r.json();
+    setConn(true);
+    document.getElementById('err').textContent = '';
+
+    const mode = document.getElementById('mode');
+    mode.textContent = d.health.dry_run ? 'DRY-RUN' : 'LIVE';
+    mode.className = 'badge ' + (d.health.dry_run ? 'dry' : 'live');
+    document.getElementById('acct').textContent = 'account: ' + maskAcct(d.health.account_id);
+    document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+
+    EXITP = d.exit_params || {};
+    renderCards(d.summary);
+    renderOpen(d.positions);
+    renderAlerts(d.alerts);
+    renderClosed(d.closed_trades);
+    nextTickAt = Date.now() + POLL_MS;
+  } catch(e){
+    setConn(false);
+    document.getElementById('err').textContent = 'Cannot reach server: ' + e.message;
+  }
+}
+
+// Expand/collapse SL & TP details on click of an open-position row.
+document.querySelector('#t-open tbody').addEventListener('click', e => {
+  const row = e.target.closest('tr.pos-row');
+  if(!row) return;
+  const sym = row.dataset.sym;
+  if(EXPANDED.has(sym)) EXPANDED.delete(sym); else EXPANDED.add(sym);
+  renderOpen(LAST_POS);
+});
+
+// Countdown to the next auto-refresh.
+setInterval(() => {
+  const s = Math.max(0, Math.ceil((nextTickAt - Date.now())/1000));
+  document.getElementById('refresh').textContent = 'refresh in ' + s + 's';
+}, 250);
+
+tick();
+setInterval(tick, POLL_MS);
+</script>
+</body>
+</html>

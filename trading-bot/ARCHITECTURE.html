@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TV &rarr; Webull Options Auto-Trader &mdash; Architecture</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #9198a1;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --amber: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #56d4dd;
+    --mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  header {
+    padding: 48px 24px 32px;
+    text-align: center;
+    background: radial-gradient(ellipse at top, #1b2735 0%, var(--bg) 70%);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0 0 8px; font-size: 2rem; letter-spacing: -0.5px; }
+  header p { margin: 0 auto; max-width: 720px; color: var(--muted); }
+  .tag {
+    display: inline-block; margin: 14px 4px 0; padding: 3px 12px;
+    border: 1px solid var(--border); border-radius: 999px;
+    font-size: 0.78rem; color: var(--accent); background: var(--panel);
+    font-family: var(--mono);
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
+  section { margin-bottom: 48px; }
+  h2 {
+    font-size: 1.35rem; margin: 0 0 20px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px;
+  }
+  h2 .num {
+    font-family: var(--mono); font-size: 0.9rem; color: var(--bg);
+    background: var(--accent); border-radius: 6px; padding: 2px 9px;
+  }
+  h3 { font-size: 1.05rem; margin: 24px 0 8px; color: var(--text); }
+  p { color: #c9d1d9; }
+  code {
+    font-family: var(--mono); font-size: 0.86em;
+    background: var(--panel-2); padding: 1px 6px; border-radius: 4px;
+    color: var(--cyan); border: 1px solid var(--border);
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Flow diagram */
+  .flow {
+    display: flex; flex-wrap: wrap; align-items: stretch; gap: 0;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 22px; overflow-x: auto;
+  }
+  .node {
+    flex: 1 1 130px; min-width: 130px; text-align: center;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 10px; position: relative;
+  }
+  .node .title { font-weight: 600; font-size: 0.9rem; }
+  .node .sub { font-size: 0.72rem; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
+  .arrow { display: flex; align-items: center; color: var(--accent); font-size: 1.5rem; padding: 0 6px; }
+  .node.tv { border-color: var(--purple); }
+  .node.net { border-color: var(--cyan); }
+  .node.api { border-color: var(--accent); }
+  .node.exec { border-color: var(--green); }
+  .node.broker { border-color: var(--amber); }
+
+  /* Cards */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; transition: border-color .15s, transform .15s;
+  }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .card .file {
+    font-family: var(--mono); font-size: 0.8rem; color: var(--accent);
+    display: block; margin-bottom: 4px;
+  }
+  .card h3 { margin: 0 0 10px; font-size: 1.02rem; }
+  .card p { margin: 0 0 12px; font-size: 0.9rem; color: #c9d1d9; }
+  .card ul { margin: 0; padding-left: 18px; font-size: 0.85rem; color: var(--muted); }
+  .card ul li { margin-bottom: 4px; }
+  .card ul li b { color: var(--text); font-weight: 600; }
+  .pill {
+    display: inline-block; font-size: 0.68rem; font-family: var(--mono);
+    padding: 2px 8px; border-radius: 999px; margin-bottom: 12px;
+  }
+  .pill.core { background: rgba(88,166,255,.15); color: var(--accent); }
+  .pill.io { background: rgba(210,153,34,.15); color: var(--amber); }
+  .pill.data { background: rgba(188,140,255,.15); color: var(--purple); }
+  .pill.test { background: rgba(63,185,80,.15); color: var(--green); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 0.86rem; margin-top: 8px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: .5px; }
+  td code { white-space: nowrap; }
+  tbody tr:hover { background: var(--panel); }
+
+  /* Callout */
+  .callout {
+    background: var(--panel); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); border-radius: 8px;
+    padding: 14px 18px; margin: 16px 0; font-size: 0.9rem;
+  }
+  .callout.warn { border-left-color: var(--amber); }
+  .callout.danger { border-left-color: var(--red); }
+  .callout b { color: var(--text); }
+
+  /* Exit ladder */
+  .ladder { display: flex; flex-direction: column; gap: 10px; }
+  .rung {
+    display: grid; grid-template-columns: 90px 1fr; gap: 16px; align-items: center;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;
+  }
+  .rung .lvl { font-family: var(--mono); font-weight: 700; text-align: right; }
+  .rung.sl .lvl { color: var(--red); }
+  .rung.be .lvl { color: var(--muted); }
+  .rung.tp1 .lvl { color: var(--green); }
+  .rung.tp2 .lvl { color: var(--green); }
+  .rung.trail .lvl { color: var(--amber); }
+  .rung .desc { font-size: 0.88rem; }
+  .rung .desc small { color: var(--muted); display: block; }
+
+  footer { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 24px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<header>
+  <h1>TradingView &rarr; Webull Options Auto-Trader</h1>
+  <p>A FastAPI webhook service that receives TradingView alerts, buys the nearest-weekly ATM
+     option on the signalled side, and autonomously manages scale-outs, breakeven, trailing
+     stops, and stop-loss on a one-minute cadence.</p>
+  <div>
+    <span class="tag">Python</span>
+    <span class="tag">FastAPI</span>
+    <span class="tag">Webull OpenAPI</span>
+    <span class="tag">asyncio</span>
+    <span class="tag">Options / 0-DTE</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- ============ OVERVIEW ============ -->
+  <section id="overview">
+    <h2><span class="num">01</span> System Flow</h2>
+    <p>A TradingView strategy fires a JSON alert on a 5-minute bar. Cloudflare Tunnel forwards it
+       to the local FastAPI server. The server authenticates, de-duplicates, applies risk gates,
+       enters the position, and hands off to a background exit engine that watches premium until flat.</p>
+    <div class="flow">
+      <div class="node tv"><div class="title">TradingView</div><div class="sub">5m alert JSON</div></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node net"><div class="title">Cloudflare Tunnel</div><div class="sub">public HTTPS</div></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node api"><div class="title">POST /webhook</div><div class="sub">main.py</div></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node exec"><div class="title">Strategy</div><div class="sub">gates &amp; entry</div></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node broker"><div class="title">Webull OpenAPI</div><div class="sub">paper / live</div></div>
+    </div>
+    <div class="callout">
+      <b>Two feedback loops keep state honest:</b> the <b>Exit Engine</b> polls quotes every 60s to
+      drive scale-outs, and the <b>Order-Events</b> gRPC stream corrects each position's cost basis
+      to the broker's real average fill price.
+    </div>
+  </section>
+
+  <!-- ============ COMPONENTS ============ -->
+  <section id="components">
+    <h2><span class="num">02</span> Application Components</h2>
+    <div class="grid">
+
+      <div class="card">
+        <span class="pill core">API / ORCHESTRATION</span>
+        <span class="file">app/main.py</span>
+        <h3>FastAPI Entry Point</h3>
+        <p>Hosts the HTTP surface and wires every component together at startup via a lifespan context.</p>
+        <ul>
+          <li><b>POST /webhook</b> &mdash; validates secret, dedupes, routes to strategy</li>
+          <li><b>GET /health</b> &mdash; dry-run flag, account, open count, daily P&amp;L</li>
+          <li><b>GET /positions</b> &mdash; live tracked positions</li>
+          <li>Constant-time secret check via <code>hmac.compare_digest</code></li>
+          <li>TTL in-memory dedupe on <code>ticker|signal|action|bar_time</code></li>
+          <li>Startup reconciliation against broker-held positions</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <span class="pill core">STRATEGY</span>
+        <span class="file">app/strategy.py</span>
+        <h3>Entry Logic &amp; Gates</h3>
+        <p>Decides whether a signal becomes a trade, then sizes and submits the opening order.</p>
+        <ul>
+          <li><b>Gates:</b> universe membership, RTH window, daily-loss halt, one-per-symbol, max concurrent</li>
+          <li>Selects contract &amp; checks the bid/ask <b>spread gate</b></li>
+          <li>Prices entry off market / bid / ask / mid + slippage buffer</li>
+          <li>Places <code>BUY_OPEN</code> and records a <code>Position</code></li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <span class="pill core">EXIT ENGINE</span>
+        <span class="file">app/position_manager.py</span>
+        <h3>Exit Management Loop</h3>
+        <p>Background asyncio task that evaluates every open position on a 1-minute cadence.</p>
+        <ul>
+          <li>Stop-loss &rarr; breakeven arm &rarr; TP1 &rarr; TP2 &rarr; trailing</li>
+          <li>Tracks <b>peak premium</b> to drive the trailing stop</li>
+          <li>Records realized P&amp;L per partial fill (&times;100 multiplier)</li>
+          <li>Never dies: each cycle wrapped in exception guard</li>
+          <li>Hot-reloads <code>config.yaml</code> each cycle</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <span class="pill io">BROKER ADAPTER</span>
+        <span class="file">app/webull_client.py</span>
+        <h3>Webull OpenAPI Client</h3>
+        <p>Isolates all broker calls; a full dry-run simulator lets the pipeline be wire-tested offline.</p>
+        <ul>
+          <li>Auth, account resolution, contract selection, quotes, orders, positions</li>
+          <li><b>Expiry rules:</b> nearest_weekly / zero_dte / nearest_monthly</li>
+          <li>Builds OCC symbols &amp; option-leg order payloads in one place</li>
+          <li><b>Dry-run:</b> simulated strikes, quotes &amp; fills via <code>set_sim_price</code></li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <span class="pill io">EVENTS</span>
+        <span class="file">app/order_events.py</span>
+        <h3>Order-Fill Subscriber</h3>
+        <p>Daemon-thread gRPC subscriber that keeps cost basis accurate for the exit engine.</p>
+        <ul>
+          <li>Listens for <code>ORDER_STATUS_CHANGED</code></li>
+          <li>On an <b>entry</b> fill, rewrites <code>Position.basis</code> to true avg price</li>
+          <li>Defensive field reads across region variants</li>
+          <li>No-op in dry-run (fills are synchronous)</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <span class="pill data">STATE</span>
+        <span class="file">app/state.py</span>
+        <h3>Crash-Recovery Store</h3>
+        <p>Thread-safe in-memory store persisted atomically to a gitignored <code>state.json</code>.</p>
+        <ul>
+          <li>Tracked positions keyed by underlying symbol</li>
+          <li>Running <b>daily realized P&amp;L</b> with automatic day-roll</li>
+          <li>Atomic writes via temp-file replace</li>
+          <li>Broker stays the source of truth; used only to resume mid-trade</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <span class="pill data">CONFIG</span>
+        <span class="file">app/config.py</span>
+        <h3>Secrets &amp; Params</h3>
+        <p>Splits sensitive secrets from tunable trading parameters.</p>
+        <ul>
+          <li><b>Secrets</b> loaded once from <code>.env</code> (frozen dataclass)</li>
+          <li><b>Params</b> re-read from <code>config.yaml</code> on demand (hot reload)</li>
+          <li>Endpoint hosts choose sandbox vs. production</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <span class="pill data">MODELS</span>
+        <span class="file">app/models.py</span>
+        <h3>Typed Data Structures</h3>
+        <p>Dataclasses shared across the app.</p>
+        <ul>
+          <li><b>Signal</b> &mdash; parsed inbound alert + dedupe key</li>
+          <li><b>OptionContract</b> &mdash; resolved tradable option</li>
+          <li><b>Quote</b> &mdash; bid/ask with <code>mid</code> &amp; <code>spread_pct</code></li>
+          <li><b>Position</b> &mdash; live position with TP/BE/peak state</li>
+        </ul>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ EXIT LADDER ============ -->
+  <section id="exits">
+    <h2><span class="num">03</span> Exit Ladder</h2>
+    <p>Every rung is configurable in <code>config.yaml</code>. Percentages are measured against the
+       option <b>premium</b> relative to entry basis, not the underlying.</p>
+    <div class="ladder">
+      <div class="rung sl">
+        <div class="lvl">&minus;20%</div>
+        <div class="desc"><b>Stop-Loss</b><small>Close all contracts if premium falls 20% below entry basis.</small></div>
+      </div>
+      <div class="rung be">
+        <div class="lvl">+20%</div>
+        <div class="desc"><b>Breakeven Arm</b><small>Stop moves up to the entry basis &mdash; the trade can no longer become a loser.</small></div>
+      </div>
+      <div class="rung tp1">
+        <div class="lvl">+30%</div>
+        <div class="desc"><b>TP1 &mdash; sell 4</b><small>First target hit; sell 4 of 10 contracts and arm a 10% trailing stop on the remainder.</small></div>
+      </div>
+      <div class="rung tp2">
+        <div class="lvl">+50%</div>
+        <div class="desc"><b>TP2 &mdash; sell 4</b><small>Second target; sell 4 more, leaving 2 runners under the trailing stop.</small></div>
+      </div>
+      <div class="rung trail">
+        <div class="lvl">&minus;10%</div>
+        <div class="desc"><b>Trailing Stop</b><small>After TP1, everything left trails 10% off the peak premium seen.</small></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CONFIG ============ -->
+  <section id="config">
+    <h2><span class="num">04</span> Configuration</h2>
+
+    <h3>config.yaml &mdash; tunable per trading day (hot-reloaded)</h3>
+    <table>
+      <thead><tr><th>Group</th><th>Key</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>universe</code></td><td>list</td><td>Allowed underlyings (AAPL, SPY, QQQ&hellip;); other alerts ignored</td></tr>
+        <tr><td><code>contract</code></td><td>strikes / moneyness / expiry</td><td>ATM selection &amp; expiry rule (nearest_weekly)</td></tr>
+        <tr><td><code>entry</code></td><td>contracts / max_spread_pct / fill_price</td><td>Size, spread gate, entry pricing + slippage</td></tr>
+        <tr><td><code>exit</code></td><td>stop_loss / tp1 / tp2 / trailing</td><td>The full exit ladder &amp; 60s monitor cadence</td></tr>
+        <tr><td><code>risk</code></td><td>max_concurrent / max_daily_loss</td><td>Portfolio guardrails &amp; daily loss halt</td></tr>
+        <tr><td><code>session</code></td><td>timezone / rth_start / rth_end</td><td>Regular-trading-hours window (ET)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>.env &mdash; secrets &amp; runtime (never committed)</h3>
+    <table>
+      <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>WEBULL_APP_KEY</code> / <code>WEBULL_APP_SECRET</code></td><td>OpenAPI credentials</td></tr>
+        <tr><td><code>WEBULL_ACCOUNT_ID</code></td><td>Paper/live account (auto-resolved if blank)</td></tr>
+        <tr><td><code>WEBULL_API_ENDPOINT</code> / <code>_EVENTS_ENDPOINT</code></td><td>Sandbox vs. production hosts</td></tr>
+        <tr><td><code>WEBHOOK_SECRET</code></td><td>Shared secret matched against alert JSON</td></tr>
+        <tr><td><code>DRY_RUN</code></td><td><code>true</code> simulates fills; <code>false</code> sends real orders</td></tr>
+        <tr><td><code>HOST</code> / <code>PORT</code></td><td>Uvicorn bind address</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ============ TESTS ============ -->
+  <section id="tests">
+    <h2><span class="num">05</span> Test &amp; Utility Scripts</h2>
+    <div class="grid">
+      <div class="card">
+        <span class="pill test">SCRIPT</span>
+        <span class="file">scripts/smoke_test.py</span>
+        <h3>Phase-0 Smoke Test</h3>
+        <p>Verifies Webull paper access end to end: authenticate, resolve account, select an ATM
+           contract, fetch a quote, place then cancel a 1-lot.</p>
+        <ul><li>Run: <code>python -m scripts.smoke_test SPY 500</code></li></ul>
+      </div>
+      <div class="card">
+        <span class="pill test">SCRIPT</span>
+        <span class="file">scripts/dry_run_test.py</span>
+        <h3>Entry + Exit Logic Test</h3>
+        <p>No network, no pytest. Walks premium through TP1/TP2/trailing and exercises stop-loss,
+           spread gate, and breakeven paths with assertions.</p>
+        <ul><li>Run: <code>python -m scripts.dry_run_test</code></li></ul>
+      </div>
+      <div class="card">
+        <span class="pill test">SCRIPT</span>
+        <span class="file">scripts/http_test.py</span>
+        <h3>HTTP-Layer Test</h3>
+        <p>Uses FastAPI's in-process <code>TestClient</code>: health, bad-secret 401, missing-field 400,
+           valid entry, duplicate suppression, non-universe rejection.</p>
+        <ul><li>Run: <code>python -m scripts.http_test</code></li></ul>
+      </div>
+      <div class="card">
+        <span class="pill test">RUNNER</span>
+        <span class="file">run.ps1</span>
+        <h3>Local Launcher</h3>
+        <p>Starts Uvicorn (or a smoke/dry test) and documents the Cloudflare Tunnel command that
+           exposes <code>/webhook</code> publicly for TradingView.</p>
+        <ul>
+          <li><code>./run.ps1</code> &mdash; serve API</li>
+          <li><code>./run.ps1 -Smoke</code> / <code>-Test</code></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ WEBHOOK CONTRACT ============ -->
+  <section id="payload">
+    <h2><span class="num">06</span> Alert Payload Contract</h2>
+    <p>TradingView must POST JSON matching this shape. <code>secret</code>, <code>ticker</code>,
+       <code>action</code>, and <code>price</code> are required; <code>action</code> must be
+       <code>CALL</code> or <code>PUT</code>.</p>
+    <table>
+      <thead><tr><th>Field</th><th>Example</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>secret</code></td><td>"long-random"</td><td>Must equal <code>WEBHOOK_SECRET</code></td></tr>
+        <tr><td><code>ticker</code></td><td>"SPY"</td><td>Must be in the universe</td></tr>
+        <tr><td><code>action</code></td><td>"CALL" / "PUT"</td><td>Buy call (bullish) or put (bearish)</td></tr>
+        <tr><td><code>price</code></td><td>500.0</td><td>Underlying price at signal</td></tr>
+        <tr><td><code>signal</code></td><td>"ORB_BREAKOUT_UP"</td><td>Engine signal name (dedupe key)</td></tr>
+        <tr><td><code>atr</code> / <code>tf</code> / <code>time</code></td><td>0.9 / "5" / 111&hellip;</td><td>Optional context; <code>time</code> = bar epoch (ms)</td></tr>
+      </tbody>
+    </table>
+    <div class="callout danger">
+      <b>Safety by default:</b> the app ships with <code>DRY_RUN=true</code> and sandbox endpoints.
+      Real orders only flow once you set <code>DRY_RUN=false</code>, supply live credentials, and
+      point the endpoints at production.
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  Generated architecture overview &mdash; TradingView &rarr; Webull Options Auto-Trader
+</footer>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Secrets
+.env
+.env.*
+!.env.example
+conf/token.txt
+
+# Ephemeral crash-recovery state (NOT committed)
+state.json
+*.state.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# Logs (kept ephemeral; not persisted)
+*.log
+*.log.*

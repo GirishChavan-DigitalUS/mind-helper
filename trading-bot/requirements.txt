@@ -1,0 +1,14 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+PyYAML==6.0.2
+python-dotenv==1.0.1
+httpx==0.27.2
+# IANA timezone database (required on Windows for zoneinfo/America/New_York)
+tzdata==2025.2
+
+# Webull OpenAPI SDK (official). Single meta-package that installs the
+# webull.core / webull.trade / webull.data namespaces used by this app.
+# Docs: https://developer.webull.com/apis/docs/sdk
+# Source: https://github.com/webull-inc/webull-openapi-python-sdk
+webull-openapi-python-sdk==3.0.0

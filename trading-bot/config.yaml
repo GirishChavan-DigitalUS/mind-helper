@@ -1,0 +1,61 @@
+# =============================================================================
+# Tunable trading parameters. Edit per trading day; the app reloads this file
+# on each webhook (hot reload) so you can tweak without restarting.
+# Secrets do NOT live here -- they live in .env.
+# =============================================================================
+
+universe:
+  # Only these underlyings are allowed to trade. Alerts for anything else are ignored.
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+  - SPY
+  - QQQ
+  - IWM
+
+contract:
+  strikes: 1              # number of strikes out from ATM (0 = exact ATM; 1 = 1 ATM per your spec)
+  moneyness: ATM          # ATM | ITM | OTM
+  expiry: nearest_weekly  # nearest_weekly | zero_dte | nearest_monthly
+  # bullish signals buy CALLs, bearish signals buy PUTs
+  side_map:
+    CALL: CALL
+    PUT: PUT
+
+entry:
+  contracts: 10                 # total contracts per entry
+  entry_tf: "5"                 # expected trigger timeframe (informational / validation)
+  max_spread_pct: 10.0          # skip entry if (ask-bid)/mid*100 > this
+  fill_price: mid               # entry pricing reference: market | bid | ask | mid
+  limit_slippage_pct: 2.0       # buffer THROUGH the reference to help fills (ignored if market)
+  tif: DAY
+
+exit:
+  monitor_interval_sec: 60      # 1-minute exit monitoring cadence
+  stop_loss_pct: 20.0           # initial stop: close all if premium down 20% from entry
+  breakeven_trigger_pct: 20.0   # at +20% profit, move the stop to breakeven (entry basis)
+  tp1_pct: 30.0                 # first target
+  tp1_contracts: 4              # sell 4 at TP1
+  tp2_pct: 50.0                 # second target
+  tp2_contracts: 4              # sell 4 at TP2
+  runner_contracts: 2           # remaining runners
+  trailing_pct: 10.0            # trailing stop %, ARMS AFTER TP1, trails off peak premium
+
+risk:
+  max_concurrent_positions: 5
+  max_daily_loss: 1000.0        # USD of realized premium loss; halts NEW entries for the day
+  one_position_per_symbol: true
+  rth_only: true                # only enter during regular trading hours
+
+session:
+  timezone: America/New_York
+  rth_start: "09:30"
+  rth_end: "16:00"
+
+webull:
+  region: us
+  paper: true                   # informational; endpoint host in .env controls sandbox vs prod
