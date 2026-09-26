@@ -1,0 +1,305 @@
+//@version=6
+// =============================================================================
+// Trend Fib Confluence — Multi-Swing Zones (Pine v6)
+// Auto-detects swing highs/lows, draws Fibonacci extension zones,
+// scores each zone by confluence with VWAP, EMA, PDH/L, RSI, Volume,
+// and secondary-swing fib overlap.
+// Style: NO multiline statements — every expression on a single physical line.
+// =============================================================================
+indicator("Trend Fib Confluence [MTF]", overlay=true, max_labels_count=200)
+
+// ─── INPUTS ─────────────────────────────────────────────────────────────────
+
+// Swing Detection
+swingLen   = input.int(5, "Pivot lookback/forward bars", minval=2, maxval=50, group="Swing Detection", tooltip="Higher = fewer, larger swings. Lower = more, smaller swings. 5 is good for 5m charts.")
+trendMode  = input.string("Auto", "Trend direction", options=["Auto", "Bullish", "Bearish"], group="Swing Detection", tooltip="Auto: last swing determines direction")
+
+// Fib Zone Boundaries (customisable)
+showGP     = input.bool(true, "Show Golden Pocket", group="Fib Zones")
+gpLo       = input.float(0.500, "  Lower %", minval=0.0, step=0.01, group="Fib Zones")
+gpHi       = input.float(0.618, "  Upper %", minval=0.0, step=0.01, group="Fib Zones")
+showDZ     = input.bool(true, "Show Decision Zone", group="Fib Zones")
+dzLo       = input.float(1.500, "  Lower %", minval=1.0, step=0.01, group="Fib Zones")
+dzHi       = input.float(1.700, "  Upper %", minval=1.0, step=0.01, group="Fib Zones")
+showEZ     = input.bool(true, "Show Extreme Zone", group="Fib Zones")
+ezLo       = input.float(2.382, "  Lower %", minval=1.5, step=0.01, group="Fib Zones")
+ezHi       = input.float(2.618, "  Upper %", minval=1.5, step=0.01, group="Fib Zones")
+showRef    = input.bool(true, "Show reference levels (0 / 100 / 200%)", group="Fib Zones")
+showSec    = input.bool(true, "Show secondary-swing fibs", group="Fib Zones", tooltip="Overlay fib zones from the previous swing pair for multi-swing confluence")
+gpCol      = input.color(color.new(#00C853, 0), "Golden Pocket color", group="Fib Zones")
+dzCol      = input.color(color.new(#2962FF, 0), "Decision Zone color", group="Fib Zones")
+ezCol      = input.color(color.new(#AA00FF, 0), "Extreme Zone color", group="Fib Zones")
+zAlpha     = input.int(85, "Zone fill transparency", minval=50, maxval=95, group="Fib Zones")
+
+// Confluence Filters
+cfVwap     = input.bool(true, "VWAP", group="Confluence")
+cfEma      = input.bool(true, "EMA 9 / 21", group="Confluence")
+cfE50      = input.bool(true, "EMA 50", group="Confluence")
+cfPD       = input.bool(true, "Prev-day H / L / C", group="Confluence")
+cfRSI      = input.bool(true, "RSI filter", group="Confluence")
+cfRsiTF    = input.timeframe("5", "  RSI timeframe", group="Confluence")
+cfRsiLen   = input.int(14, "  RSI length", minval=2, group="Confluence")
+cfVol      = input.bool(true, "Volume spike", group="Confluence")
+cfVolX     = input.float(1.5, "  Volume spike x SMA(20)", minval=1.0, step=0.1, group="Confluence")
+cfTol      = input.float(0.3, "Proximity tolerance (ATR x)", minval=0.05, step=0.05, group="Confluence", tooltip="How close another level must be to a zone midpoint to count as confluence")
+
+// Dashboard + Alerts
+showDash   = input.bool(true, "Show dashboard", group="Display")
+dashSz     = input.string("tiny", "Dashboard text size", options=["tiny","small","normal"], group="Display")
+alGP       = input.bool(true, "Alert: Golden Pocket entry", group="Alerts")
+alDZ       = input.bool(true, "Alert: Decision Zone entry", group="Alerts")
+alEZ       = input.bool(true, "Alert: Extreme Zone entry", group="Alerts")
+alMinScore = input.int(3, "Min confluence for alert", minval=1, maxval=7, group="Alerts")
+
+// ─── HELPERS ────────────────────────────────────────────────────────────────
+
+isNear(float a, float b, float t) => not na(a) and not na(b) and math.abs(a - b) <= t
+
+fibLvl(float base, float dir, float rng, float pct) => base + dir * pct * rng
+
+txtSz = dashSz == "tiny" ? size.tiny : dashSz == "small" ? size.small : size.normal
+
+// ─── SWING DETECTION ────────────────────────────────────────────────────────
+
+newPH = ta.pivothigh(high, swingLen, swingLen)
+newPL = ta.pivotlow(low, swingLen, swingLen)
+
+var float sh1 = na
+var float sh2 = na
+var float sl1 = na
+var float sl2 = na
+var int sh1_bi = 0
+var int sh2_bi = 0
+var int sl1_bi = 0
+var int sl2_bi = 0
+
+if not na(newPH)
+    sh2 := sh1
+    sh2_bi := sh1_bi
+    sh1 := newPH
+    sh1_bi := bar_index - swingLen
+
+if not na(newPL)
+    sl2 := sl1
+    sl2_bi := sl1_bi
+    sl1 := newPL
+    sl1_bi := bar_index - swingLen
+
+// ─── TREND DIRECTION ────────────────────────────────────────────────────────
+
+autoUp = sh1_bi > sl1_bi
+isBull = trendMode == "Bullish" ? true : trendMode == "Bearish" ? false : autoUp
+
+// ─── PRIMARY FIB LEVELS ─────────────────────────────────────────────────────
+
+haveP  = not na(sh1) and not na(sl1) and math.abs(sh1 - sl1) > syminfo.mintick * 10
+pRange = haveP ? math.abs(sh1 - sl1) : 0.0
+pBase  = haveP ? (isBull ? sl1 : sh1) : na
+pDir   = isBull ? 1.0 : -1.0
+
+p000 = haveP ? fibLvl(pBase, pDir, pRange, 0.000) : na
+p100 = haveP ? fibLvl(pBase, pDir, pRange, 1.000) : na
+p200 = haveP ? fibLvl(pBase, pDir, pRange, 2.000) : na
+pGPlo = haveP ? fibLvl(pBase, pDir, pRange, gpLo) : na
+pGPhi = haveP ? fibLvl(pBase, pDir, pRange, gpHi) : na
+pDZlo = haveP ? fibLvl(pBase, pDir, pRange, dzLo) : na
+pDZhi = haveP ? fibLvl(pBase, pDir, pRange, dzHi) : na
+pEZlo = haveP ? fibLvl(pBase, pDir, pRange, ezLo) : na
+pEZhi = haveP ? fibLvl(pBase, pDir, pRange, ezHi) : na
+
+// ─── SECONDARY FIB LEVELS (previous swing pair) ────────────────────────────
+
+haveS  = showSec and not na(sh2) and not na(sl2) and math.abs(sh2 - sl2) > syminfo.mintick * 10
+sRange = haveS ? math.abs(sh2 - sl2) : 0.0
+sBase  = haveS ? (isBull ? sl2 : sh2) : na
+
+sGPlo = haveS ? fibLvl(sBase, pDir, sRange, gpLo) : na
+sGPhi = haveS ? fibLvl(sBase, pDir, sRange, gpHi) : na
+sDZlo = haveS ? fibLvl(sBase, pDir, sRange, dzLo) : na
+sDZhi = haveS ? fibLvl(sBase, pDir, sRange, dzHi) : na
+sEZlo = haveS ? fibLvl(sBase, pDir, sRange, ezLo) : na
+sEZhi = haveS ? fibLvl(sBase, pDir, sRange, ezHi) : na
+
+// ─── CONFLUENCE METRICS ─────────────────────────────────────────────────────
+
+vwapV  = ta.vwap(hlc3)
+ema9   = ta.ema(close, 9)
+ema21  = ta.ema(close, 21)
+ema50  = ta.ema(close, 50)
+atrV   = ta.atr(14)
+tol    = atrV * cfTol
+
+rsiF() => ta.rsi(close, cfRsiLen)
+rsiV   = request.security(syminfo.tickerid, cfRsiTF, rsiF(), lookahead=barmerge.lookahead_off)
+
+volV     = volume
+volAvg   = ta.sma(volume, 20)
+volSpike = nz(volV) > nz(volAvg) * cfVolX
+
+pdF() => [high[1], low[1], close[1]]
+[pdh, pdl, pdc] = request.security(syminfo.tickerid, "D", pdF(), lookahead=barmerge.lookahead_on)
+
+// ─── CONFLUENCE SCORING (per zone, max 7) ───────────────────────────────────
+
+// --- Zone 1: Golden Pocket (entry / reversal zone) ---
+z1mid    = haveP ? (pGPlo + pGPhi) / 2.0 : na
+z1_vwap  = cfVwap and isNear(vwapV, z1mid, tol) ? 1 : 0
+z1_ema   = cfEma and (isNear(ema9, z1mid, tol) or isNear(ema21, z1mid, tol)) ? 1 : 0
+z1_e50   = cfE50 and isNear(ema50, z1mid, tol) ? 1 : 0
+z1_pd    = cfPD and (isNear(pdh, z1mid, tol) or isNear(pdl, z1mid, tol) or isNear(pdc, z1mid, tol)) ? 1 : 0
+z1_rsi   = cfRSI and ((isBull and rsiV < 35) or (not isBull and rsiV > 65)) ? 1 : 0
+z1_vol   = cfVol and volSpike ? 1 : 0
+z1_sfib  = haveS and (isNear(sGPlo, z1mid, tol) or isNear(sGPhi, z1mid, tol) or isNear(sDZlo, z1mid, tol) or isNear(sEZlo, z1mid, tol)) ? 1 : 0
+z1score  = z1_vwap + z1_ema + z1_e50 + z1_pd + z1_rsi + z1_vol + z1_sfib
+
+// --- Zone 2: Decision Zone (continuation / profit zone) ---
+z2mid    = haveP ? (pDZlo + pDZhi) / 2.0 : na
+z2_vwap  = cfVwap and isNear(vwapV, z2mid, tol) ? 1 : 0
+z2_ema   = cfEma and (isNear(ema9, z2mid, tol) or isNear(ema21, z2mid, tol)) ? 1 : 0
+z2_e50   = cfE50 and isNear(ema50, z2mid, tol) ? 1 : 0
+z2_pd    = cfPD and (isNear(pdh, z2mid, tol) or isNear(pdl, z2mid, tol) or isNear(pdc, z2mid, tol)) ? 1 : 0
+z2_rsi   = cfRSI and ((isBull and rsiV > 55 and rsiV < 75) or (not isBull and rsiV > 25 and rsiV < 45)) ? 1 : 0
+z2_vol   = cfVol and volSpike ? 1 : 0
+z2_sfib  = haveS and (isNear(sGPlo, z2mid, tol) or isNear(sGPhi, z2mid, tol) or isNear(sDZlo, z2mid, tol) or isNear(sDZhi, z2mid, tol) or isNear(sEZlo, z2mid, tol)) ? 1 : 0
+z2score  = z2_vwap + z2_ema + z2_e50 + z2_pd + z2_rsi + z2_vol + z2_sfib
+
+// --- Zone 3: Extreme Zone (exhaustion / reversal zone) ---
+z3mid    = haveP ? (pEZlo + pEZhi) / 2.0 : na
+z3_vwap  = cfVwap and isNear(vwapV, z3mid, tol) ? 1 : 0
+z3_ema   = cfEma and (isNear(ema9, z3mid, tol) or isNear(ema21, z3mid, tol)) ? 1 : 0
+z3_e50   = cfE50 and isNear(ema50, z3mid, tol) ? 1 : 0
+z3_pd    = cfPD and (isNear(pdh, z3mid, tol) or isNear(pdl, z3mid, tol) or isNear(pdc, z3mid, tol)) ? 1 : 0
+z3_rsi   = cfRSI and ((isBull and rsiV > 70) or (not isBull and rsiV < 30)) ? 1 : 0
+z3_vol   = cfVol and volSpike ? 1 : 0
+z3_sfib  = haveS and (isNear(sGPhi, z3mid, tol) or isNear(sDZlo, z3mid, tol) or isNear(sDZhi, z3mid, tol) or isNear(sEZlo, z3mid, tol) or isNear(sEZhi, z3mid, tol)) ? 1 : 0
+z3score  = z3_vwap + z3_ema + z3_e50 + z3_pd + z3_rsi + z3_vol + z3_sfib
+
+// ─── PLOTS — PRIMARY FIB ZONES ─────────────────────────────────────────────
+
+ppGPlo = plot(showGP and haveP ? pGPlo : na, "GP lower", color=color.new(gpCol, 40), linewidth=1)
+ppGPhi = plot(showGP and haveP ? pGPhi : na, "GP upper", color=color.new(gpCol, 40), linewidth=1)
+ppDZlo = plot(showDZ and haveP ? pDZlo : na, "DZ lower", color=color.new(dzCol, 40), linewidth=1)
+ppDZhi = plot(showDZ and haveP ? pDZhi : na, "DZ upper", color=color.new(dzCol, 40), linewidth=1)
+ppEZlo = plot(showEZ and haveP ? pEZlo : na, "EZ lower", color=color.new(ezCol, 40), linewidth=1)
+ppEZhi = plot(showEZ and haveP ? pEZhi : na, "EZ upper", color=color.new(ezCol, 40), linewidth=1)
+
+fill(ppGPlo, ppGPhi, color=color.new(gpCol, zAlpha), title="Golden Pocket fill")
+fill(ppDZlo, ppDZhi, color=color.new(dzCol, zAlpha), title="Decision Zone fill")
+fill(ppEZlo, ppEZhi, color=color.new(ezCol, zAlpha), title="Extreme Zone fill")
+
+// Reference levels
+plot(showRef and haveP ? p000 : na, "0%",   color=color.new(color.gray, 50), linewidth=1, style=plot.style_cross)
+plot(showRef and haveP ? p100 : na, "100%", color=color.new(color.yellow, 50), linewidth=2)
+plot(showRef and haveP ? p200 : na, "200%", color=color.new(color.red, 50), linewidth=1, style=plot.style_cross)
+
+// ─── PLOTS — SECONDARY FIB ZONES (lighter) ─────────────────────────────────
+
+sAlpha = math.min(zAlpha + 8, 95)
+
+psGPlo = plot(showSec and haveS ? sGPlo : na, "S-GP lo", color=color.new(gpCol, 70), linewidth=1)
+psGPhi = plot(showSec and haveS ? sGPhi : na, "S-GP hi", color=color.new(gpCol, 70), linewidth=1)
+psDZlo = plot(showSec and haveS ? sDZlo : na, "S-DZ lo", color=color.new(dzCol, 70), linewidth=1)
+psDZhi = plot(showSec and haveS ? sDZhi : na, "S-DZ hi", color=color.new(dzCol, 70), linewidth=1)
+psEZlo = plot(showSec and haveS ? sEZlo : na, "S-EZ lo", color=color.new(ezCol, 70), linewidth=1)
+psEZhi = plot(showSec and haveS ? sEZhi : na, "S-EZ hi", color=color.new(ezCol, 70), linewidth=1)
+
+fill(psGPlo, psGPhi, color=color.new(gpCol, sAlpha), title="Secondary GP fill")
+fill(psDZlo, psDZhi, color=color.new(dzCol, sAlpha), title="Secondary DZ fill")
+fill(psEZlo, psEZhi, color=color.new(ezCol, sAlpha), title="Secondary EZ fill")
+
+// ─── CONFLUENCE OVERLAY LEVELS ──────────────────────────────────────────────
+
+plot(cfVwap ? vwapV : na, "VWAP", color=color.new(color.orange, 20), linewidth=2)
+plot(cfEma ? ema9 : na, "EMA 9", color=color.new(color.aqua, 60), linewidth=1)
+plot(cfEma ? ema21 : na, "EMA 21", color=color.new(color.aqua, 40), linewidth=1)
+plot(cfE50 ? ema50 : na, "EMA 50", color=color.new(color.yellow, 50), linewidth=1)
+plot(cfPD ? pdh : na, "PDH", color=color.new(color.white, 60), style=plot.style_cross)
+plot(cfPD ? pdl : na, "PDL", color=color.new(color.white, 60), style=plot.style_cross)
+plot(cfPD ? pdc : na, "PDC", color=color.new(color.silver, 60), style=plot.style_cross)
+
+// ─── PRICE-IN-ZONE + BG TINT ───────────────────────────────────────────────
+
+inGP = haveP and close >= math.min(pGPlo, pGPhi) and close <= math.max(pGPlo, pGPhi)
+inDZ = haveP and close >= math.min(pDZlo, pDZhi) and close <= math.max(pDZlo, pDZhi)
+inEZ = haveP and close >= math.min(pEZlo, pEZhi) and close <= math.max(pEZlo, pEZhi)
+
+bgcolor(inGP and z1score >= 2 ? color.new(gpCol, 92) : na, title="In GP tint")
+bgcolor(inDZ and z2score >= 2 ? color.new(dzCol, 92) : na, title="In DZ tint")
+bgcolor(inEZ and z3score >= 2 ? color.new(ezCol, 92) : na, title="In EZ tint")
+
+// ─── ZONE LABELS (right edge) ───────────────────────────────────────────────
+
+if barstate.islast and haveP and showGP
+    label.new(bar_index + 4, pGPlo, "GP " + str.tostring(z1score) + "/7  (" + str.tostring(gpLo * 100, "#.#") + "–" + str.tostring(gpHi * 100, "#.#") + "%)", style=label.style_label_left, color=color.new(gpCol, 40), textcolor=color.white, size=size.small)
+
+if barstate.islast and haveP and showDZ
+    label.new(bar_index + 4, pDZlo, "DZ " + str.tostring(z2score) + "/7  (" + str.tostring(dzLo * 100, "#.#") + "–" + str.tostring(dzHi * 100, "#.#") + "%)", style=label.style_label_left, color=color.new(dzCol, 40), textcolor=color.white, size=size.small)
+
+if barstate.islast and haveP and showEZ
+    label.new(bar_index + 4, pEZlo, "EZ " + str.tostring(z3score) + "/7  (" + str.tostring(ezLo * 100, "#.#") + "–" + str.tostring(ezHi * 100, "#.#") + "%)", style=label.style_label_left, color=color.new(ezCol, 40), textcolor=color.white, size=size.small)
+
+// ─── SWING MARKERS ──────────────────────────────────────────────────────────
+
+plotshape(not na(newPH), title="Swing High", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 30), size=size.tiny)
+plotshape(not na(newPL), title="Swing Low", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 30), size=size.tiny)
+
+// ─── DASHBOARD ──────────────────────────────────────────────────────────────
+
+var table dash = table.new(position.bottom_right, 3, 11, border_width=1, frame_color=color.new(color.gray, 50), frame_width=1)
+
+scoreCol(int s) => s >= 5 ? color.new(color.lime, 10) : s >= 3 ? color.new(color.yellow, 30) : s >= 1 ? color.new(color.orange, 40) : color.new(color.gray, 60)
+
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "Zone",  bgcolor=color.new(color.black, 50), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 1, 0, "Range", bgcolor=color.new(color.black, 50), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 2, 0, "Score", bgcolor=color.new(color.black, 50), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 0, 1, "Golden Pocket",  bgcolor=color.new(gpCol, 70), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 1, 1, str.tostring(pGPlo, "#.##") + " – " + str.tostring(pGPhi, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 2, 1, str.tostring(z1score) + " / 7", bgcolor=scoreCol(z1score), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 0, 2, "Decision Zone",  bgcolor=color.new(dzCol, 70), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 1, 2, str.tostring(pDZlo, "#.##") + " – " + str.tostring(pDZhi, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 2, 2, str.tostring(z2score) + " / 7", bgcolor=scoreCol(z2score), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 0, 3, "Extreme Zone",   bgcolor=color.new(ezCol, 70), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 1, 3, str.tostring(pEZlo, "#.##") + " – " + str.tostring(pEZhi, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 2, 3, str.tostring(z3score) + " / 7", bgcolor=scoreCol(z3score), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 0, 4, "VWAP",    bgcolor=color.new(color.black, 80), text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 4, str.tostring(vwapV, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.orange, text_size=txtSz)
+    table.cell(dash, 2, 4, "",        bgcolor=color.new(color.black, 80), text_size=txtSz)
+    rsiCol = rsiV < 35 ? color.new(color.lime, 0) : rsiV > 65 ? color.new(color.red, 0) : color.new(color.gray, 30)
+    table.cell(dash, 0, 5, "RSI " + cfRsiTF, bgcolor=color.new(color.black, 80), text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 5, str.tostring(rsiV, "#.#"), bgcolor=color.new(color.black, 80), text_color=rsiCol, text_size=txtSz)
+    table.cell(dash, 2, 5, "",        bgcolor=color.new(color.black, 80), text_size=txtSz)
+    volCol = volSpike ? color.new(color.lime, 0) : color.new(color.gray, 40)
+    table.cell(dash, 0, 6, "Volume",  bgcolor=color.new(color.black, 80), text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 6, volSpike ? "SPIKE" : "normal", bgcolor=color.new(color.black, 80), text_color=volCol, text_size=txtSz)
+    table.cell(dash, 2, 6, "",        bgcolor=color.new(color.black, 80), text_size=txtSz)
+    dirCol = isBull ? color.new(color.lime, 0) : color.new(color.red, 0)
+    table.cell(dash, 0, 7, "Direction", bgcolor=color.new(color.black, 80), text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 7, isBull ? "BULLISH" : "BEARISH", bgcolor=color.new(color.black, 80), text_color=dirCol, text_size=txtSz)
+    table.cell(dash, 2, 7, "",        bgcolor=color.new(color.black, 80), text_size=txtSz)
+    secOvlp = z1_sfib + z2_sfib + z3_sfib
+    secCol  = secOvlp >= 2 ? color.new(color.lime, 0) : secOvlp >= 1 ? color.new(color.yellow, 0) : color.new(color.gray, 40)
+    table.cell(dash, 0, 8, "2nd Fib Overlap", bgcolor=color.new(color.black, 80), text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 8, str.tostring(secOvlp) + " / 3 zones", bgcolor=color.new(color.black, 80), text_color=secCol, text_size=txtSz)
+    table.cell(dash, 2, 8, "",        bgcolor=color.new(color.black, 80), text_size=txtSz)
+    table.cell(dash, 0, 9,  "SH / SL",   bgcolor=color.new(color.black, 80), text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 9,  str.tostring(sh1, "#.##") + " / " + str.tostring(sl1, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.white, text_size=txtSz)
+    table.cell(dash, 2, 9,  "primary",   bgcolor=color.new(color.black, 80), text_color=color.gray, text_size=txtSz)
+    table.cell(dash, 0, 10, "SH₂ / SL₂", bgcolor=color.new(color.black, 80), text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 10, str.tostring(sh2, "#.##") + " / " + str.tostring(sl2, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.gray, text_size=txtSz)
+    table.cell(dash, 2, 10, "secondary", bgcolor=color.new(color.black, 80), text_color=color.gray, text_size=txtSz)
+
+// ─── ALERTS (JSON, dedup per bar close) ─────────────────────────────────────
+
+fireGP = alGP and inGP and z1score >= alMinScore
+fireDZ = alDZ and inDZ and z2score >= alMinScore
+fireEZ = alEZ and inEZ and z3score >= alMinScore
+
+aMsg(string zone, int score, float lo, float hi) => '{"ticker":"' + syminfo.ticker + '","zone":"' + zone + '","price":' + str.tostring(close) + ',"lo":' + str.tostring(lo, "#.##") + ',"hi":' + str.tostring(hi, "#.##") + ',"confluence":' + str.tostring(score) + '}'
+
+if fireGP
+    alert(aMsg("GOLDEN_POCKET", z1score, pGPlo, pGPhi), alert.freq_once_per_bar_close)
+if fireDZ
+    alert(aMsg("DECISION_ZONE", z2score, pDZlo, pDZhi), alert.freq_once_per_bar_close)
+if fireEZ
+    alert(aMsg("EXTREME_ZONE", z3score, pEZlo, pEZhi), alert.freq_once_per_bar_close)

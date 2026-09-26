@@ -1,0 +1,361 @@
+//@version=6
+// =============================================================================
+//  HPS Quad Pro  [Divergence / 20-20 Bull Flag / Super Signal Exits]
+//  Price-chart signal engine for the "Anatomy of a HPS Trade" system
+//  (Futures Trade Alert Network). Pairs with the "HPS Quad Stochastics" panel.
+//
+//  WHAT IT DOES
+//  ------------
+//  Layers EMA 20/50/200, VWAP and the Daily Pivot over price and fires the
+//  three documented HPS setups (long AND short):
+//    1. QUAD DIVERGENCE ("Holy Grail")
+//         Stage 1 : all 4 stochastics push under 20 (quad oversold).
+//         Stage 2 : price prints an EQUAL/LOWER pivot low while the 9-3 makes a
+//                   HIGHER pivot low (bullish divergence).
+//         Entry   : 9-3 turns up and crosses back above 20.
+//    2. 20/20 BULL FLAG (trend continuation)
+//         Uptrend (EMA20>EMA50, price>EMA50), an aggressive >=1.5*ATR extension
+//         off the 20 EMA, a pullback to the 20/50 EMA, the 9-3 dropped toward
+//         the 20 line, and the 60-10 holding above the strength guide (85+).
+//         Entry   : price touches the 20 EMA OR the 9-3 reaches the 20 line.
+//    3. QUAD SUPER SIGNAL exits
+//         Manages the last entry by trend context (EMA200 + VWAP): scale + move
+//         to breakeven when the 9-3 reaches 80 in a weak/counter context; give
+//         room and exit on a 60-10 rotation in a strong trend.
+//
+//  NON-REPAINT: pivots are confirmed (`pivotRight` bars late) and every signal
+//  is committed only on bar close (barstate.isconfirmed), so nothing redraws.
+//
+//  Recommended chart: @ES / index futures on 1-min (matches the source method).
+// =============================================================================
+indicator("HPS Quad Pro [Divergence/Bull Flag/Exits]", shorttitle="HPS Quad Pro", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================ INPUTS =========================================
+grpStoch = "Stochastics"
+len1  = input.int(9,  "9-3  %K Length",  minval = 1, group = grpStoch, inline = "s1")
+sm1   = input.int(3,  "Smooth",          minval = 1, group = grpStoch, inline = "s1")
+len2  = input.int(14, "14-3 %K Length",  minval = 1, group = grpStoch, inline = "s2")
+sm2   = input.int(3,  "Smooth",          minval = 1, group = grpStoch, inline = "s2")
+len3  = input.int(40, "40-4 %K Length",  minval = 1, group = grpStoch, inline = "s3")
+sm3   = input.int(4,  "Smooth",          minval = 1, group = grpStoch, inline = "s3")
+len60 = input.int(60, "60-10 %K Length", minval = 1, group = grpStoch, inline = "s4")
+sm60  = input.int(10, "Smooth K",        minval = 1, group = grpStoch, inline = "s4")
+sm60d = input.int(1,  "Smooth D",        minval = 1, group = grpStoch, inline = "s4")
+
+grpLvl = "Stochastic Levels"
+obLvl     = input.int(80, "Overbought", minval = 50, maxval = 100, group = grpLvl)
+osLvl     = input.int(20, "Oversold",   minval = 0,  maxval = 50,  group = grpLvl)
+flagK     = input.int(25, "Bull-Flag 9-3 pullback level", minval = 1, maxval = 50, group = grpLvl)
+strongLvl = input.int(85, "60-10 Trend-Strength gate", minval = 50, maxval = 100, group = grpLvl)
+
+grpMA = "Trend / VWAP / Pivot"
+ema1Len   = input.int(20,  "EMA 1 (fast)", minval = 1, group = grpMA)
+ema2Len   = input.int(50,  "EMA 2 (mid)",  minval = 1, group = grpMA)
+ema3Len   = input.int(200, "EMA 3 (slow)", minval = 1, group = grpMA)
+showEMAs  = input.bool(true, "Plot EMAs", group = grpMA)
+showVWAP  = input.bool(true, "Plot VWAP", group = grpMA)
+showPivot = input.bool(true, "Plot Daily Pivot (PP)", group = grpMA)
+
+grpDiv = "Setup 1: Quad Divergence"
+useDiv     = input.bool(true, "Enable Quad Divergence", group = grpDiv)
+pivotLeft  = input.int(5, "Pivot Left",  minval = 1, group = grpDiv)
+pivotRight = input.int(3, "Pivot Right", minval = 1, group = grpDiv)
+divExpiry  = input.int(15, "Bars to confirm 9-3 cross after divergence", minval = 1, group = grpDiv)
+
+grpFlag = "Setup 2: 20/20 Bull Flag"
+useFlag      = input.bool(true, "Enable 20/20 Bull Flag", group = grpFlag)
+atrLen       = input.int(14, "ATR Length", minval = 1, group = grpFlag)
+atrMult      = input.float(1.5, "Aggressive-move ATR multiple", minval = 0.1, step = 0.1, group = grpFlag)
+flagLookback = input.int(10, "Aggressive-move lookback (bars)", minval = 2, group = grpFlag)
+
+grpExit = "Setup 3: Quad Super Signal Exits"
+useExit  = input.bool(true, "Enable Exit Management", group = grpExit)
+stopTicks= input.int(2, "Stop offset (ticks under/over pattern)", minval = 0, group = grpExit)
+showStop = input.bool(true, "Draw Stop Line", group = grpExit)
+
+grpSess = "Session Filter"
+useSession = input.bool(true, "Only signal during NY session", group = grpSess)
+sess       = input.session("0930-1600", "Session", group = grpSess)
+tz         = input.string("America/New_York", "Timezone", group = grpSess)
+
+grpCol = "Colors"
+longCol  = input.color(color.green,  "Long Entry",  group = grpCol)
+shortCol = input.color(color.red,    "Short Entry", group = grpCol)
+scaleCol = input.color(color.orange, "Scale / Breakeven", group = grpCol)
+exitCol  = input.color(color.fuchsia,"Exit", group = grpCol)
+stopCol  = input.color(color.new(color.red, 20), "Stop Line", group = grpCol)
+
+grpUI = "Dashboard"
+showTable = input.bool(true, "Show Status Table", group = grpUI)
+tblPos    = input.string("Top Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpUI)
+
+// ============================ CALCULATIONS ===================================
+f_fastStoch(int len, int smoothK) =>
+    ta.sma(ta.stoch(close, high, low, len), smoothK)
+
+f_fullStoch(int len, int smoothK, int smoothD) =>
+    fullK = ta.sma(ta.stoch(close, high, low, len), smoothK)
+    ta.sma(fullK, smoothD)
+
+k1  = f_fastStoch(len1, sm1)              // 9-3  trigger
+k2  = f_fastStoch(len2, sm2)              // 14-3
+k3  = f_fastStoch(len3, sm3)              // 40-4
+k60 = f_fullStoch(len60, sm60, sm60d)     // 60-10 trend strength
+
+ema20 = ta.ema(close, ema1Len)
+ema50 = ta.ema(close, ema2Len)
+ema200= ta.ema(close, ema3Len)
+vwapVal = ta.vwap
+atr   = ta.atr(atrLen)
+
+// Prior-day pivot (non-repainting: previous completed daily bar)
+pdH = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_on)
+pdL = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_on)
+pdC = request.security(syminfo.tickerid, "D", close[1],lookahead = barmerge.lookahead_on)
+pp  = (pdH + pdL + pdC) / 3
+
+// Session gate
+tSess    = time(timeframe.period, sess, tz)
+inSess   = not na(tSess)
+sessOK   = (not useSession) or inSess
+confirmed= barstate.isconfirmed
+
+// Shared context flags
+quadOversold   = k1 < osLvl and k2 < osLvl and k3 < osLvl and k60 < osLvl
+quadOverbought = k1 > obLvl and k2 > obLvl and k3 > obLvl and k60 > obLvl
+
+// ============================ PLOTS: EMAs / VWAP / PIVOT ======================
+plot(showEMAs ? ema20 : na,  "EMA 20",  color = color.new(color.yellow, 0), linewidth = 1)
+plot(showEMAs ? ema50 : na,  "EMA 50",  color = color.new(color.blue, 0),   linewidth = 1)
+plot(showEMAs ? ema200 : na, "EMA 200", color = color.new(color.red, 0),    linewidth = 2)
+plot(showVWAP ? vwapVal : na,"VWAP",     color = color.new(color.aqua, 0),   linewidth = 1)
+plot(showPivot ? pp : na,    "Pivot PP", color = color.new(color.orange, 0), linewidth = 1, style = plot.style_stepline)
+
+// ============================ ACTIVE-TRADE STATE =============================
+var int    tradeDir   = 0        // 1 long, -1 short, 0 flat
+var float  tradeEntry = na
+var float  tradeStop  = na
+var int    tradeBar   = na
+var string tradeSetup = ""
+var bool   tradeScaled= false
+var line   stopLine   = na
+var label  stopLabel  = na
+
+tickOff = stopTicks * syminfo.mintick
+
+// ============================ SETUP 1: QUAD DIVERGENCE =======================
+// Strict pivot divergence on the 9-3, then fire when the 9-3 crosses back
+// through the 20/80 line within `divExpiry` bars (the "turn up" confirmation).
+plK = ta.pivotlow(k1, pivotLeft, pivotRight)
+phK = ta.pivothigh(k1, pivotLeft, pivotRight)
+
+var float prevPLval   = na
+var float prevPLprice = na
+var bool  prevPLquad  = false    // was Stage-1 (prior pivot low) quad oversold?
+var float prevPHval   = na
+var float prevPHprice = na
+var bool  prevPHquad  = false    // was Stage-1 (prior pivot high) quad overbought?
+var int   divLongBar  = na       // bar a bullish divergence armed
+var int   divShortBar = na
+
+bullDiv = false
+bearDiv = false
+
+if not na(plK)
+    curPrice = low[pivotRight]
+    curQuad  = quadOversold[pivotRight]
+    // Stage-1 (prevPLquad) was quad oversold, Stage-2 price equal/lower, 9-3 higher low
+    if not na(prevPLval) and curPrice <= prevPLprice and plK > prevPLval and prevPLquad
+        bullDiv := true
+        divLongBar := bar_index
+    prevPLval   := plK
+    prevPLprice := curPrice
+    prevPLquad  := curQuad
+
+if not na(phK)
+    curPrice = high[pivotRight]
+    curQuad  = quadOverbought[pivotRight]
+    // Stage-1 (prevPHquad) was quad overbought, Stage-2 price equal/higher, 9-3 lower high
+    if not na(prevPHval) and curPrice >= prevPHprice and phK < prevPHval and prevPHquad
+        bearDiv := true
+        divShortBar := bar_index
+    prevPHval   := phK
+    prevPHprice := curPrice
+    prevPHquad  := curQuad
+
+// entry trigger = 9-3 turning back up/down through the oversold/overbought line
+divLongFire  = useDiv and sessOK and confirmed and not na(divLongBar)  and (bar_index - divLongBar  <= divExpiry) and ta.crossover(k1, osLvl)
+divShortFire = useDiv and sessOK and confirmed and not na(divShortBar) and (bar_index - divShortBar <= divExpiry) and ta.crossunder(k1, obLvl)
+
+if divLongFire
+    divLongBar := na
+
+if divShortFire
+    divShortBar := na
+
+// ============================ SETUP 2: 20/20 BULL FLAG =======================
+trendUp = ema20 > ema50 and close > ema50
+trendDn = ema20 < ema50 and close < ema50
+
+distAbove = close - ema20
+distBelow = ema20 - close
+aggressiveUp = ta.highest(distAbove, flagLookback) >= atrMult * atr
+aggressiveDn = ta.highest(distBelow, flagLookback) >= atrMult * atr
+
+pullbackUp = low  <= ema20                 // pullback touches the 20 EMA
+pullbackDn = high >= ema20
+
+var bool flagLongUsed  = false
+var bool flagShortUsed = false
+
+// reset the latch once the flag has "worked" (9-3 rotated back to the far band)
+// or the trend structure breaks
+if k1 >= obLvl or not trendUp
+    flagLongUsed := false
+if k1 <= osLvl or not trendDn
+    flagShortUsed := false
+
+flagLongGates = trendUp and aggressiveUp and k60 >= strongLvl and k1 <= flagK
+flagDnGates   = trendDn and aggressiveDn and k60 <= (100 - strongLvl) and k1 >= (100 - flagK)
+
+flagLongTrig  = flagLongGates and (pullbackUp or k1 <= osLvl)
+flagDnTrig    = flagDnGates   and (pullbackDn or k1 >= obLvl)
+
+flagLongFire  = useFlag and sessOK and confirmed and flagLongTrig and not flagLongUsed
+flagShortFire = useFlag and sessOK and confirmed and flagDnTrig   and not flagShortUsed
+
+if flagLongFire
+    flagLongUsed := true
+if flagShortFire
+    flagShortUsed := true
+
+// ============================ ENTRY LABELS + TRADE SET =======================
+f_entryTip(string setup, int dir) =>
+    dirTxt = dir == 1 ? "LONG" : "SHORT"
+    ctx    = "EMA20 " + str.tostring(ema20, format.mintick) + " | EMA50 " + str.tostring(ema50, format.mintick) + " | EMA200 " + str.tostring(ema200, format.mintick)
+    stochTxt = "9-3 " + str.tostring(k1, "#.0") + " | 60-10 " + str.tostring(k60, "#.0")
+    setup + " " + dirTxt + "\n• " + ctx + "\n• " + stochTxt + "\n• Stop = pattern " + (dir == 1 ? "low" : "high") + " ± " + str.tostring(stopTicks) + " ticks"
+
+longFire  = divLongFire  or flagLongFire
+shortFire = divShortFire or flagShortFire
+
+if longFire
+    setup = divLongFire ? "Quad Divergence" : "20/20 Bull Flag"
+    label.new(bar_index, low, "▲ " + (divLongFire ? "Div" : "Flag"), yloc = yloc.belowbar, color = longCol, textcolor = color.white, style = label.style_label_up, size = size.small, tooltip = f_entryTip(setup, 1))
+    tradeDir    := 1
+    tradeEntry  := close
+    tradeStop   := low - tickOff
+    tradeBar    := bar_index
+    tradeSetup  := setup
+    tradeScaled := false
+    if showStop
+        if not na(stopLine)
+            line.delete(stopLine)
+        if not na(stopLabel)
+            label.delete(stopLabel)
+        stopLine  := line.new(bar_index, tradeStop, bar_index + 5, tradeStop, color = stopCol, width = 1, style = line.style_dashed)
+        stopLabel := label.new(bar_index + 5, tradeStop, "Stop " + str.tostring(tradeStop, format.mintick), style = label.style_label_left, color = color.new(stopCol, 30), textcolor = color.white, size = size.tiny)
+
+if shortFire
+    setup = divShortFire ? "Quad Divergence" : "20/20 Bull Flag"
+    label.new(bar_index, high, "▼ " + (divShortFire ? "Div" : "Flag"), yloc = yloc.abovebar, color = shortCol, textcolor = color.white, style = label.style_label_down, size = size.small, tooltip = f_entryTip(setup, -1))
+    tradeDir    := -1
+    tradeEntry  := close
+    tradeStop   := high + tickOff
+    tradeBar    := bar_index
+    tradeSetup  := setup
+    tradeScaled := false
+    if showStop
+        if not na(stopLine)
+            line.delete(stopLine)
+        if not na(stopLabel)
+            label.delete(stopLabel)
+        stopLine  := line.new(bar_index, tradeStop, bar_index + 5, tradeStop, color = stopCol, width = 1, style = line.style_dashed)
+        stopLabel := label.new(bar_index + 5, tradeStop, "Stop " + str.tostring(tradeStop, format.mintick), style = label.style_label_left, color = color.new(stopCol, 30), textcolor = color.white, size = size.tiny)
+
+// ============================ SETUP 3: SUPER SIGNAL EXITS ====================
+// Trend context per the slides: strong = trading with the 200 EMA and VWAP.
+strongLong  = close > ema200 and close > vwapVal
+strongShort = close < ema200 and close < vwapVal
+
+// keep the drawn stop line tracking to the right edge while a trade is open
+if useExit and tradeDir != 0 and not na(stopLine)
+    line.set_x2(stopLine, bar_index + 5)
+    if not na(stopLabel)
+        label.set_x(stopLabel, bar_index + 5)
+        label.set_y(stopLabel, tradeStop)
+
+scaleLong  = useExit and sessOK and confirmed and tradeDir == 1  and not tradeScaled and (not strongLong)  and ta.crossover(k1, obLvl)
+scaleShort = useExit and sessOK and confirmed and tradeDir == -1 and not tradeScaled and (not strongShort) and ta.crossunder(k1, osLvl)
+
+// full exit: 60-10 rotation out of strength, or a close through the stop
+exitLongRot  = useExit and sessOK and confirmed and tradeDir == 1  and ta.crossunder(k60, strongLvl)
+exitShortRot = useExit and sessOK and confirmed and tradeDir == -1 and ta.crossover(k60, 100 - strongLvl)
+stopHitLong  = useExit and confirmed and tradeDir == 1  and close < tradeStop
+stopHitShort = useExit and confirmed and tradeDir == -1 and close > tradeStop
+
+exitLongFire  = exitLongRot or stopHitLong
+exitShortFire = exitShortRot or stopHitShort
+
+if scaleLong
+    tradeScaled := true
+    tradeStop   := tradeEntry        // move stop to breakeven
+    label.new(bar_index, high, "TP/BE", yloc = yloc.abovebar, color = scaleCol, textcolor = color.white, style = label.style_label_down, size = size.tiny, tooltip = "9-3 reached " + str.tostring(obLvl) + " in weak/counter context → scale out, move stop to breakeven")
+if scaleShort
+    tradeScaled := true
+    tradeStop   := tradeEntry
+    label.new(bar_index, low, "TP/BE", yloc = yloc.belowbar, color = scaleCol, textcolor = color.white, style = label.style_label_up, size = size.tiny, tooltip = "9-3 reached " + str.tostring(osLvl) + " in weak/counter context → scale out, move stop to breakeven")
+
+if exitLongFire
+    reason = stopHitLong ? "Stop hit" : "60-10 rotated below strength"
+    label.new(bar_index, high, "Exit", yloc = yloc.abovebar, color = exitCol, textcolor = color.white, style = label.style_label_down, size = size.tiny, tooltip = "Exit LONG — " + reason)
+    tradeDir := 0
+if exitShortFire
+    reason = stopHitShort ? "Stop hit" : "60-10 rotated above strength"
+    label.new(bar_index, low, "Exit", yloc = yloc.belowbar, color = exitCol, textcolor = color.white, style = label.style_label_up, size = size.tiny, tooltip = "Exit SHORT — " + reason)
+    tradeDir := 0
+
+// ============================ ALERTS =========================================
+alertcondition(divLongFire,  "Quad Divergence Long",  "HPS Quad Divergence LONG on {{ticker}}")
+alertcondition(divShortFire, "Quad Divergence Short", "HPS Quad Divergence SHORT on {{ticker}}")
+alertcondition(flagLongFire, "Bull Flag Long",  "HPS 20/20 Bull Flag LONG on {{ticker}}")
+alertcondition(flagShortFire,"Bull Flag Short", "HPS 20/20 Bear Flag SHORT on {{ticker}}")
+alertcondition(scaleLong or scaleShort, "Scale / Breakeven", "HPS scale out + move to breakeven on {{ticker}}")
+alertcondition(exitLongFire or exitShortFire, "Exit", "HPS exit signal on {{ticker}}")
+
+// ============================ STATUS TABLE ===================================
+f_pos() =>
+    tblPos == "Top Left"     ? position.top_left     :
+     tblPos == "Bottom Right" ? position.bottom_right :
+     tblPos == "Bottom Left"  ? position.bottom_left  :
+     position.top_right
+
+f_stCol(float v) => v >= obLvl ? color.red : v <= osLvl ? color.green : color.gray
+
+var table dash = na
+if showTable and barstate.islast
+    if not na(dash)
+        table.delete(dash)
+    dash := table.new(f_pos(), 2, 9, border_width = 1, frame_color = color.gray, frame_width = 1)
+    trendTxt = close > ema200 and close > vwapVal ? "STRONG UP" : close < ema200 and close < vwapVal ? "STRONG DOWN" : close > ema50 ? "UP" : close < ema50 ? "DOWN" : "MIXED"
+    trendCol = str.contains(trendTxt, "UP") ? color.green : str.contains(trendTxt, "DOWN") ? color.red : color.gray
+    posTxt = tradeDir == 1 ? (tradeScaled ? "LONG (BE)" : "LONG") : tradeDir == -1 ? (tradeScaled ? "SHORT (BE)" : "SHORT") : "FLAT"
+    posCol = tradeDir == 1 ? color.green : tradeDir == -1 ? color.red : color.gray
+    table.cell(dash, 0, 0, "HPS Quad Pro", text_color = color.white, bgcolor = color.new(color.blue, 0), text_size = size.small)
+    table.cell(dash, 1, 0, sessOK ? "Session ✓" : "Off-Session", text_color = color.white, bgcolor = sessOK ? color.new(color.green, 20) : color.new(color.gray, 20), text_size = size.small)
+    table.cell(dash, 0, 1, "Trend", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 1, trendTxt, text_color = trendCol, text_size = size.small)
+    table.cell(dash, 0, 2, "Position", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 2, posTxt, text_color = posCol, text_size = size.small)
+    table.cell(dash, 0, 3, "Setup", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 3, tradeDir == 0 ? "-" : tradeSetup, text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 4, "Stop", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 4, tradeDir == 0 ? "-" : str.tostring(tradeStop, format.mintick), text_color = color.orange, text_size = size.small)
+    table.cell(dash, 0, 5, "9-3",   text_color = color.red,   text_size = size.small)
+    table.cell(dash, 1, 5, str.tostring(k1,  "#.0"), text_color = f_stCol(k1),  text_size = size.small)
+    table.cell(dash, 0, 6, "14-3",  text_color = color.green, text_size = size.small)
+    table.cell(dash, 1, 6, str.tostring(k2,  "#.0"), text_color = f_stCol(k2),  text_size = size.small)
+    table.cell(dash, 0, 7, "40-4",  text_color = color.aqua,  text_size = size.small)
+    table.cell(dash, 1, 7, str.tostring(k3,  "#.0"), text_color = f_stCol(k3),  text_size = size.small)
+    table.cell(dash, 0, 8, "60-10", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 8, str.tostring(k60, "#.0"), text_color = k60 >= strongLvl ? color.green : k60 <= (100 - strongLvl) ? color.red : color.gray, text_size = size.small)

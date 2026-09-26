@@ -1,0 +1,266 @@
+//@version=6
+// =============================================================================
+//  Level Break + EMA Pullback  [13 / 48 / 200]
+//  Multi-timeframe intraday system modeled on the Team2Trading ("Casey")
+//  method for trading SPY / QQQ / IWM options.
+//
+//  THE STRATEGY (as published)
+//  ---------------------------
+//  1. Mark 4 key levels: Previous Day High/Low (PDH/PDL) and
+//     Pre-Market High/Low (PMH/PML).
+//  2. Stack three EMAs: 13 (yellow), 48 (purple), 200 (red).
+//       Bull trend  -> 13 > 48 > 200   (EMAs act as support, buy the dip)
+//       Bear trend  -> 200 > 48 > 13   (EMAs act as resistance, sell rips)
+//  3. Confirm a level break with a 15-minute candle CLOSE beyond the level.
+//  4. Enter on the lower timeframe (2m) as price dips back into the 13 EMA
+//     inside the stacked trend, then reclaims it.
+//       A+ CALLS : 15m close > PMH (or PDH) -> 2m dip to 13 EMA -> long
+//       A+ PUTS  : 15m close < PML (or PDL) -> 2m pullback to 13 EMA -> short
+//
+//  DESIGN NOTES
+//  ------------
+//  * Run this on the ENTRY chart (2m recommended). The break is confirmed on
+//    a higher "Confirmation Timeframe" (15m default) pulled with
+//    request.security using close[1] + lookahead_on -> the LAST CLOSED htf bar,
+//    so break signals never repaint.
+//  * PMH/PML are built live during the pre-market window and then frozen for
+//    the regular session; they reset the next pre-market. This is equities-
+//    intraday logic (needs a real pre-market) -> use on SPY/QQQ/IWM etc.
+//  * PDH/PDL come from the prior daily bar (stable intraday).
+//  * Entries fire only on closed bars: a genuine dip into the 13 EMA followed
+//    by a reclaim (ta.crossover / ta.crossunder of close vs the 13 EMA).
+//  * Optional RTH filter keeps signals inside 09:30-16:00.
+//  * This tool FLAGS qualified candidates - the source method is discretionary
+//    (flag quality, market context), so treat signals as an assist.
+// =============================================================================
+indicator("Level Break + EMA Pullback [13/48/200]", shorttitle="LvlBreak EMA", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================ INPUTS =========================================
+grpTF = "Timeframes"
+confTF = input.timeframe("15", "Confirmation Timeframe (level break close)", group = grpTF, tooltip = "Higher timeframe whose candle CLOSE confirms a level break. Run the indicator itself on your entry timeframe (2m recommended).")
+
+grpEMA = "EMAs"
+len1  = input.int(13,  "Fast EMA (13)",   minval = 1, group = grpEMA, inline = "e1")
+len2  = input.int(48,  "Mid EMA (48)",    minval = 1, group = grpEMA, inline = "e2")
+len3  = input.int(200, "Slow EMA (200)",  minval = 1, group = grpEMA, inline = "e3")
+col1  = input.color(color.yellow, "13", group = grpEMA, inline = "e1")
+col2  = input.color(color.purple, "48", group = grpEMA, inline = "e2")
+col3  = input.color(color.red,    "200", group = grpEMA, inline = "e3")
+colByTrend = input.bool(true, "Tint 13 EMA green/red by trend", group = grpEMA)
+
+grpLvl = "Key Levels"
+showPDH = input.bool(true, "Previous Day High (PDH)", group = grpLvl, inline = "l1")
+showPDL = input.bool(true, "Previous Day Low (PDL)",  group = grpLvl, inline = "l2")
+showPMH = input.bool(true, "Pre-Market High (PMH)",   group = grpLvl, inline = "l3")
+showPML = input.bool(true, "Pre-Market Low (PML)",    group = grpLvl, inline = "l4")
+pdhCol  = input.color(color.new(color.blue, 0),   "", group = grpLvl, inline = "l1")
+pdlCol  = input.color(color.new(color.blue, 0),   "", group = grpLvl, inline = "l2")
+pmhCol  = input.color(color.new(color.orange, 0), "", group = grpLvl, inline = "l3")
+pmlCol  = input.color(color.new(color.orange, 0), "", group = grpLvl, inline = "l4")
+pmSess  = input.session("0400-0930", "Pre-Market Window", group = grpLvl, tooltip = "Session used to build PMH/PML each day (exchange timezone).")
+tz      = input.string("America/New_York", "Session Timezone", group = grpLvl)
+lvlW    = input.int(1, "Level Line Width", minval = 1, maxval = 5, group = grpLvl)
+showLvlLabels = input.bool(true, "Show Level Labels", group = grpLvl)
+
+grpEntry = "Break & Entry Logic"
+armPMH = input.bool(true,  "Bull break: 15m close ABOVE PMH", group = grpEntry)
+armPDH = input.bool(true,  "Bull break: 15m close ABOVE PDH", group = grpEntry)
+armPML = input.bool(true,  "Bear break: 15m close BELOW PML", group = grpEntry)
+armPDL = input.bool(true,  "Bear break: 15m close BELOW PDL", group = grpEntry)
+tolMode = input.string("ATR", "13 EMA Touch Tolerance", options = ["ATR", "Percent"], group = grpEntry, tooltip = "How close price must dip to the 13 EMA to count as a touch.")
+atrLen  = input.int(14, "ATR Length", minval = 1, group = grpEntry)
+atrMult = input.float(0.25, "ATR Multiple", minval = 0.0, step = 0.05, group = grpEntry)
+pctTol  = input.float(0.10, "Percent Tolerance (%)", minval = 0.0, step = 0.05, group = grpEntry)
+holdMid = input.bool(true, "Require dip to hold beyond the 48 EMA", group = grpEntry, tooltip = "Long: close must stay above the 48 EMA on the reclaim (mirror for shorts). Filters deep pullbacks that break trend.")
+entryMode = input.string("Reclaim (close cross)", "Entry Trigger", options = ["Reclaim (close cross)", "Wick Touch (rejection)", "Both"], group = grpEntry, tooltip = "Reclaim: price dips to the 13 EMA, then a later bar CLOSES back across it (crossover/under). Wick Touch: a single bar wicks into the 13 EMA but CLOSES back on the trend side (rejection) - fires on that bar.")
+wickColor = input.bool(true, "Wick mode: require rejection candle color", group = grpEntry, tooltip = "Long wick entry must close green (close >= open); short must close red. Filters indecisive touches.")
+useRTH  = input.bool(true, "Only fire entries during Regular Hours", group = grpEntry)
+rthSess = input.session("0930-1600", "Regular Session", group = grpEntry)
+
+grpUI = "Signals & Dashboard"
+longCol   = input.color(color.new(color.green, 0), "Long Signal", group = grpUI)
+shortCol  = input.color(color.new(color.red, 0),   "Short Signal", group = grpUI)
+showBreak = input.bool(true, "Mark 15m break events", group = grpUI)
+breakUpCol= input.color(color.new(color.green, 40), "Bull Break Mark", group = grpUI)
+breakDnCol= input.color(color.new(color.red, 40),   "Bear Break Mark", group = grpUI)
+showTable = input.bool(true, "Show Status Table", group = grpUI)
+tblPos    = input.string("Top Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpUI)
+
+// ============================ HELPERS ========================================
+f_tblPos(string p) =>
+    p == "Top Left" ? position.top_left : p == "Bottom Right" ? position.bottom_right : p == "Bottom Left" ? position.bottom_left : position.top_right
+
+// ============================ EMAs & TREND ===================================
+ema1 = ta.ema(close, len1)
+ema2 = ta.ema(close, len2)
+ema3 = ta.ema(close, len3)
+
+bullStack = ema1 > ema2 and ema2 > ema3
+bearStack = ema1 < ema2 and ema2 < ema3
+
+ema1Col = colByTrend ? (bullStack ? color.green : bearStack ? color.red : col1) : col1
+plot(ema1, "EMA 13",  color = ema1Col, linewidth = 2)
+plot(ema2, "EMA 48",  color = col2,    linewidth = 1)
+plot(ema3, "EMA 200", color = col3,    linewidth = 2)
+
+// ============================ KEY LEVELS =====================================
+// Previous day high/low - prior DAILY bar, stable intraday, no repaint.
+pdh = request.security(syminfo.tickerid, "D", high[1], barmerge.gaps_off, barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],  barmerge.gaps_off, barmerge.lookahead_on)
+
+// Pre-market high/low - built live during the pre-market window each day,
+// then frozen through the regular session until the next pre-market resets it.
+inPM  = not na(time(timeframe.period, pmSess, tz))
+newPM = inPM and not inPM[1]
+
+var float pmh = na
+var float pml = na
+if newPM
+    pmh := high
+    pml := low
+else if inPM
+    pmh := math.max(pmh, high)
+    pml := math.min(pml, low)
+
+pdhV = showPDH ? pdh : na
+pdlV = showPDL ? pdl : na
+pmhV = showPMH ? pmh : na
+pmlV = showPML ? pml : na
+
+plot(pdhV, "PDH", color = pdhCol, linewidth = lvlW, style = plot.style_linebr)
+plot(pdlV, "PDL", color = pdlCol, linewidth = lvlW, style = plot.style_linebr)
+plot(pmhV, "PMH", color = pmhCol, linewidth = lvlW, style = plot.style_linebr)
+plot(pmlV, "PML", color = pmlCol, linewidth = lvlW, style = plot.style_linebr)
+
+// right-edge labels for the levels
+var label lbPDH = na
+var label lbPDL = na
+var label lbPMH = na
+var label lbPML = na
+f_lvlLabel(label lb, float v, bool show, color c, string txt) =>
+    label out = lb
+    if not na(lb)
+        label.delete(lb)
+        out := na
+    if show and showLvlLabels and not na(v)
+        out := label.new(bar_index, v, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(c, 85), textcolor = c, size = size.small)
+    out
+if barstate.islast
+    lbPDH := f_lvlLabel(lbPDH, pdhV, showPDH, pdhCol, "PDH")
+    lbPDL := f_lvlLabel(lbPDL, pdlV, showPDL, pdlCol, "PDL")
+    lbPMH := f_lvlLabel(lbPMH, pmhV, showPMH, pmhCol, "PMH")
+    lbPML := f_lvlLabel(lbPML, pmlV, showPML, pmlCol, "PML")
+
+// ============================ 15m BREAK CONFIRMATION =========================
+// Last CLOSED confirmation-timeframe close -> non-repainting.
+htfClose = request.security(syminfo.tickerid, confTF, close[1], barmerge.gaps_off, barmerge.lookahead_on)
+
+brkPMH = armPMH and showPMH and not na(pmh) and htfClose > pmh
+brkPDH = armPDH and showPDH and not na(pdh) and htfClose > pdh
+brkPML = armPML and showPML and not na(pml) and htfClose < pml
+brkPDL = armPDL and showPDL and not na(pdl) and htfClose < pdl
+
+// self-latching while confirmed htf closes stay beyond the level
+bullArmed = brkPMH or brkPDH
+bearArmed = brkPML or brkPDL
+
+bullBreakEvt = bullArmed and not bullArmed[1]
+bearBreakEvt = bearArmed and not bearArmed[1]
+
+f_brkName(bool up) =>
+    up ? (brkPMH ? "PMH" : brkPDH ? "PDH" : "-") : (brkPML ? "PML" : brkPDL ? "PDL" : "-")
+
+// ============================ ENTRY LOGIC ====================================
+atr    = ta.atr(atrLen)
+tolVal = tolMode == "ATR" ? atr * atrMult : close * pctTol / 100.0
+
+inRTH   = not na(time(timeframe.period, rthSess, tz))
+tradeOK = not useRTH or inRTH
+
+bullSetup = bullArmed and bullStack
+bearSetup = bearArmed and bearStack
+
+// A pullback is "armed" once price dips into (touches) the 13 EMA within the
+// stacked trend; the entry then fires when price reclaims the 13 EMA.
+var bool longPB  = false
+var bool shortPB = false
+
+// reset stale pullback state when the trend or the break is no longer valid
+if not bullSetup
+    longPB := false
+if not bearSetup
+    shortPB := false
+
+// arm on a genuine dip to the 13 EMA
+if bullSetup and low <= ema1 + tolVal
+    longPB := true
+if bearSetup and high >= ema1 - tolVal
+    shortPB := true
+
+midOKlong  = not holdMid or close > ema2
+midOKshort = not holdMid or close < ema2
+
+useReclaim = entryMode != "Wick Touch (rejection)"
+useWick    = entryMode != "Reclaim (close cross)"
+
+// RECLAIM: a prior dip is latched, then price closes back across the 13 EMA.
+reclaimLong  = useReclaim and longPB  and bullSetup and tradeOK and ta.crossover(close, ema1)  and midOKlong
+reclaimShort = useReclaim and shortPB and bearSetup and tradeOK and ta.crossunder(close, ema1) and midOKshort
+
+// WICK TOUCH: a single bar wicks into the 13 EMA but closes back on the trend
+// side (a rejection). We require the prior bar to have closed on the trend side
+// too, so only a FRESH dip fires - this throttles clustered hugging bars.
+wickLong  = useWick and bullSetup and tradeOK and low  <= ema1 + tolVal and close > ema1 and close[1] > ema1[1] and midOKlong  and (not wickColor or close >= open)
+wickShort = useWick and bearSetup and tradeOK and high >= ema1 - tolVal and close < ema1 and close[1] < ema1[1] and midOKshort and (not wickColor or close <= open)
+
+longFire  = reclaimLong  or wickLong
+shortFire = reclaimShort or wickShort
+
+// consume the latched pullback only on a reclaim fire
+if reclaimLong
+    longPB := false
+if reclaimShort
+    shortPB := false
+
+// ============================ SIGNAL PLOTS ===================================
+plotshape(longFire,  "Long Entry",  style = shape.triangleup,   location = location.belowbar, color = longCol,  size = size.small, text = "LONG")
+plotshape(shortFire, "Short Entry", style = shape.triangledown, location = location.abovebar, color = shortCol, size = size.small, text = "SHORT")
+
+// tiny "w" tag on entries triggered by a wick-touch rejection (vs a reclaim close)
+plotshape(wickLong  and not reclaimLong,  "Long Wick Touch",  style = shape.circle, location = location.belowbar, color = color.new(longCol, 20),  size = size.tiny, text = "w")
+plotshape(wickShort and not reclaimShort, "Short Wick Touch", style = shape.circle, location = location.abovebar, color = color.new(shortCol, 20), size = size.tiny, text = "w")
+
+plotshape(showBreak and bullBreakEvt, "Bull Break", style = shape.triangleup,   location = location.bottom, color = breakUpCol, size = size.tiny, text = "brk")
+plotshape(showBreak and bearBreakEvt, "Bear Break", style = shape.triangledown, location = location.top,    color = breakDnCol, size = size.tiny, text = "brk")
+
+// ============================ ALERTS =========================================
+alertcondition(longFire,     "Long Entry",  "LvlBreak LONG on {{ticker}} @ {{close}} (15m break + 2m dip to 13 EMA)")
+alertcondition(shortFire,    "Short Entry", "LvlBreak SHORT on {{ticker}} @ {{close}} (15m break + 2m pullback to 13 EMA)")
+alertcondition(bullBreakEvt, "Bull Break",  "15m close broke ABOVE key level on {{ticker}} @ {{close}}")
+alertcondition(bearBreakEvt, "Bear Break",  "15m close broke BELOW key level on {{ticker}} @ {{close}}")
+
+// ============================ STATUS TABLE ===================================
+var table t = na
+if showTable and barstate.islast
+    if not na(t)
+        table.delete(t)
+    t := table.new(f_tblPos(tblPos), 2, 5, border_width = 1, frame_color = color.gray, frame_width = 1)
+    hdrBg = color.new(color.gray, 15)
+    valBg = color.new(color.silver, 85)
+
+    trendTxt = bullStack ? "BULL" : bearStack ? "BEAR" : "MIXED"
+    trendCol = bullStack ? color.green : bearStack ? color.red : color.gray
+    armTxt   = bullArmed ? "Bull brk " + f_brkName(true) : bearArmed ? "Bear brk " + f_brkName(false) : "none"
+    armCol   = bullArmed ? color.green : bearArmed ? color.red : color.gray
+    pbTxt    = longPB ? "long dip" : shortPB ? "short dip" : "-"
+
+    table.cell(t, 0, 0, "Trend",   text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 0, trendTxt,  text_color = trendCol,    bgcolor = valBg, text_size = size.small)
+    table.cell(t, 0, 1, "Break",   text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 1, armTxt,    text_color = armCol,      bgcolor = valBg, text_size = size.small)
+    table.cell(t, 0, 2, "Pullback",text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 2, pbTxt,     text_color = color.white, bgcolor = valBg, text_size = size.small)
+    table.cell(t, 0, 3, "Session", text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 3, inRTH ? "RTH" : inPM ? "Pre-Mkt" : "Closed", text_color = color.white, bgcolor = valBg, text_size = size.small)
+    table.cell(t, 0, 4, "13 EMA",  text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 4, str.tostring(ema1, format.mintick), text_color = ema1Col, bgcolor = valBg, text_size = size.small)

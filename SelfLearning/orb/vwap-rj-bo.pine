@@ -1,0 +1,156 @@
+//@version=6
+indicator("VWAP Rejection/Bounce v5", overlay=true, max_labels_count=500)
+
+// ── Inputs ──────────────────────────────────────────────
+atrLen      = input.int(14, "ATR Length")
+touchMult   = input.float(0.05, "VWAP Touch Proximity (x ATR)", step=0.01,
+                 tooltip="Price within this fraction of ATR from VWAP counts as a 'touch' (the zero candle). Default 5% of ATR per spec.")
+scopeBars   = input.int(5, "Confirmation Scope (candles)", minval=1, maxval=20,
+                 tooltip="After the first (reversal) candle, look at most this many candles for a valid confirmation candle.")
+minGap      = input.int(3, "Min Candle Space Between Same-Direction Signals", minval=0,
+                 tooltip="Suppress a signal if the previous same-direction signal was fewer than this many candles ago.")
+
+// ── NY session ──────────────────────────────────────────
+useSession  = input.bool(true, "Limit Signals to Session")
+sessInput   = input.session("0930-1600", "Session (Regular Hours)")
+sessTz      = input.string("America/New_York", "Session Timezone")
+showSessBG  = input.bool(false, "Shade Session Background")
+
+// ── Volume (optional) ───────────────────────────────────
+volMALen    = input.int(20, "Volume MA Length")
+volMult     = input.float(1.1, "Volume Confirm Mult", step=0.1)
+requireVol  = input.bool(false, "Require Volume Confirmation (confirm candle)")
+
+// ── Core series ─────────────────────────────────────────
+vwapVal   = ta.vwap
+atrVal    = ta.atr(atrLen)
+volMA     = ta.sma(volume, volMALen)
+touchBand = atrVal * touchMult
+
+inSession = not useSession or not na(time(timeframe.period, sessInput, sessTz))
+
+isGreen = close > open
+isRed   = close < open
+volOK   = not requireVol or volume > volMA * volMult
+
+// A candle whose BODY straddles VWAP is treated as an extension of the first
+// candle (per spec) — it can never be a valid confirmation candle.
+bodyCrossVWAP = (open < vwapVal and close > vwapVal) or (open > vwapVal and close < vwapVal)
+
+// Touch = candle came within touch proximity of VWAP (the "zero" candle).
+buyNear  = low  <= vwapVal + touchBand
+sellNear = high >= vwapVal - touchBand
+
+// First candle = reversal off VWAP that CLOSES on the signal side, coming out
+// of a touch on this bar or the immediately prior bar (handles wick-cross /
+// body-cross-then-reverse cases).
+firstBuy  = isGreen and close > vwapVal and (buyNear  or buyNear[1])
+firstSell = isRed   and close < vwapVal and (sellNear or sellNear[1])
+
+// ── BUY state machine ───────────────────────────────────
+// 1) firstBuy sets a green reversal candle above VWAP -> remember its HIGH.
+// 2) Within scopeBars, a GREEN candle that closes above the current reference
+//    HIGH (and does NOT straddle VWAP) fires a BUY.
+//    A green candle that does NOT confirm becomes the new reference candle and
+//    restarts the scope. Red candles above VWAP just wait; a straddling body is
+//    treated as an extension; a close back below VWAP invalidates the setup.
+var int   buyStage   = 0
+var float buyRefHigh = na
+var int   buyBars    = 0
+buySignal = false
+
+if close < vwapVal
+    buyStage := 0
+    buyRefHigh := na
+    buyBars := 0
+
+if buyStage == 1
+    buyBars += 1
+    if buyBars > scopeBars
+        buyStage := 0
+        buyRefHigh := na
+        buyBars := 0
+    else if bodyCrossVWAP
+        buyStage := 1
+    else if isGreen
+        if close > buyRefHigh and volOK
+            buySignal := true
+            buyStage := 0
+            buyRefHigh := na
+            buyBars := 0
+        else
+            // advance reference to the most recent green candle, restart scope
+            buyRefHigh := high
+            buyBars := 0
+
+if buyStage == 0 and firstBuy
+    buyStage := 1
+    buyRefHigh := high
+    buyBars := 0
+
+// ── SELL state machine (mirror) ─────────────────────────
+var int   sellStage  = 0
+var float sellRefLow = na
+var int   sellBars   = 0
+sellSignal = false
+
+if close > vwapVal
+    sellStage := 0
+    sellRefLow := na
+    sellBars := 0
+
+if sellStage == 1
+    sellBars += 1
+    if sellBars > scopeBars
+        sellStage := 0
+        sellRefLow := na
+        sellBars := 0
+    else if bodyCrossVWAP
+        sellStage := 1
+    else if isRed
+        if close < sellRefLow and volOK
+            sellSignal := true
+            sellStage := 0
+            sellRefLow := na
+            sellBars := 0
+        else
+            // advance reference to the most recent red candle, restart scope
+            sellRefLow := low
+            sellBars := 0
+
+if sellStage == 0 and firstSell
+    sellStage := 1
+    sellRefLow := low
+    sellBars := 0
+
+// gate to session
+buySignal  := buySignal  and inSession
+sellSignal := sellSignal and inSession
+
+// enforce minimum candle space between same-direction signals
+var int lastBuyBar  = na
+var int lastSellBar = na
+
+if buySignal and not na(lastBuyBar) and (bar_index - lastBuyBar) <= minGap
+    buySignal := false
+if buySignal
+    lastBuyBar := bar_index
+
+if sellSignal and not na(lastSellBar) and (bar_index - lastSellBar) <= minGap
+    sellSignal := false
+if sellSignal
+    lastSellBar := bar_index
+
+// ── Plots ───────────────────────────────────────────────
+plot(vwapVal, "VWAP", color=color.new(color.blue, 0), linewidth=2)
+
+bgcolor(showSessBG and inSession ? color.new(color.blue, 92) : na, title="Session BG")
+
+plotshape(buySignal, title="Buy", style=shape.triangleup,
+     location=location.belowbar, color=color.new(color.lime, 0), size=size.small)
+
+plotshape(sellSignal, title="Sell", style=shape.triangledown,
+     location=location.abovebar, color=color.new(color.red, 0), size=size.small)
+
+alertcondition(buySignal,  title="VWAP Buy Signal",  message="VWAP reversal BUY confirmed")
+alertcondition(sellSignal, title="VWAP Sell Signal", message="VWAP reversal SELL confirmed")

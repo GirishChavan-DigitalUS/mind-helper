@@ -1,0 +1,517 @@
+// ORIGINAL, independently-built approximation script — not a copy, decompile, or
+// derivative of "Pro Scalper" or any other third-party/protected indicator.
+//
+// v2 REDESIGN: the v1 multi-path confluence model was replaced after comparing
+// against 17 real Pro Scalper flag events (exported via TradingView's chart-data
+// export, with every other indicator hidden so the export was unambiguous).
+// That signature (strict BUY/SELL alternation, momentum-confirmed direction)
+// matched a trailing-ATR-band trend-flip system (SuperTrend-style), not a
+// multi-condition confluence model.
+//
+// v2.2-v2.5: refit against 22 days / 185 real signals, fixed a direction-color
+// inversion bug, replaced "hold until the opposite flag" with a real stop/target/
+// breakeven/time-stop exit system, and fixed a position-sizing bug that was
+// splitting single trades into a "Margin call" fill plus a remainder fill.
+//
+// v3.0 REDESIGN (from TradingView's public "About this script" text for Pro
+// Scalper, which the user was able to read even though the source code itself
+// is invite-only/protected): that text discloses Pro Scalper is built on a
+// "Kalman-adapted Supertrend" for its buy/sell signals, plus separate "VWMA
+// bands" that form dynamic overbought/oversold zones used for take-profit
+// ("TP") points and reversal ("R") labels. Two real, structural changes follow:
+//   1. ENTRY ENGINE: previously fed raw price into ta.supertrend(). Now runs a
+//      simple scalar Kalman filter over price first, and feeds that smoothed
+//      estimate into a manually-built SuperTrend recurrence (ta.supertrend()
+//      doesn't accept a custom source, so the built-in couldn't do this — this
+//      replicates its exact band/flip logic by hand instead). Re-fit by grid
+//      search against the same 37 real RTH signals used before: atrPeriod=7,
+//      factor=2.0, Kalman Q=0.01/R=0.2 now matches 33/37 (89.2%), up from 31/37
+//      (83.8%) with the old plain-SuperTrend engine.
+//   2. EXIT REFERENCE: added VWMA-based overbought/oversold bands (an ORIGINAL
+//      construction inspired by the public description — "VWMA bands ... using
+//      highest high and lowest low values with specified multipliers" — NOT a
+//      reverse-engineered copy, since TradingView's chart-data export only
+//      captures plot()/shape() series, not these overlay bands, so there was no
+//      real exported band data to fit against). Also added visual "TP" markers
+//      (exhaustion inside a zone: a lower high while overbought, or a higher low
+//      while oversold) and an optional strategy exit that closes the position
+//      when price touches the opposite-side zone, as an alternative to the pure
+//      ATR bracket. Compare these bands visually against Pro Scalper's real
+//      red/green zone bands and tune vwmaLen/upperMult/lowerMult to taste — this
+//      piece has NOT been fit to real data the way the entry engine has.
+//
+// v3.1 FIX (from a live side-by-side screenshot): the v3.0 zone bands were
+// hugging the candle wicks almost every bar instead of sitting apart as a real
+// overbought/oversold zone, which meant the zone-touch exit fired far too
+// often. Root cause: vwmaLen=20 (only ~100 min of lookback on a 5-min chart)
+// put the highest-high/lowest-low anchors right next to whatever price just
+// did, leaving no room. Fixed by widening vwmaLen to 50, smoothing the
+// highest-high/lowest-low anchors themselves with an SMA (bandSmoothLen=20) so
+// the band moves as a slow wave instead of snapping in sharp steps, and
+// raising the stretch multipliers to 1.5. Still an original, not-fit-to-real-
+// data construction — re-compare visually and keep tuning.
+//
+// v3.2 ADDITION (from a follow-up screenshot): Pro Scalper's real band has a
+// visible "ribbon" quality — it thickens right after a fresh high/low forms
+// and tapers as that level ages, communicating how much conviction is behind
+// it. Added an original mechanism for the same idea, not a copy of whatever
+// the real math does: ta.highestbars()/ta.lowestbars() report how many bars
+// ago the current window's extreme actually printed (0 = this bar, freshest).
+// That "freshness" score now scales both the band's width (fresh = full
+// stretch, stale = tapers toward a floor, never fully flat) and its fill
+// opacity (fresh = darker, stale = fades) — so the ribbon visibly pulses
+// wide/dark right when a new extreme sets, then narrows/fades until the next
+// one resets it.
+//
+// v3.3 ADDITION (from another live screenshot): the real band also showed a
+// slow, session-length taper — wide right after the open, gradually
+// narrowing through the day — that local highest-high/lowest-low recency
+// alone doesn't produce (a rolling window would jump around with price, not
+// decay smoothly over hours). Hypothesis: realized volatility is typically
+// elevated right after the open and settles through the session, and the
+// real band width scales with that. Added current-ATR-vs-its-own-longer-run-
+// average as a second, independent multiplier (useVolAdj/volAdjLen) so the
+// whole band now breathes on two timescales at once — fast local pulses from
+// v3.2, slow session-level contraction from this. Still an unverified guess,
+// not confirmed against real math — compare and toggle off if it doesn't fit.
+//
+// v3.4 WALK-BACK (from re-reading Pro Scalper's public description closely):
+// it says the zones use the highest-high/lowest-low "with A specified
+// multiplier" (singular) and describes the adaptability to volatility/trend
+// as a property of that construction itself, not a separate mechanism. A
+// rolling highest-high/lowest-low is already a live measure of realized
+// range — it should widen in volatile stretches and narrow in calm ones on
+// its own — and VWMA already drifts with trend. So v3.2 and v3.3 were both
+// extra hypotheses layered on top of something that may not have needed them.
+// Worse, bandSmoothLen was set to 20 (fairly heavy SMA smoothing on the
+// highest-high/lowest-low), which likely flattened out that natural
+// volatility-responsiveness — quite possibly the real reason v3.1 didn't show
+// it, not a missing layer. Defaults now: bandSmoothLen down to 5 (light
+// touch, just enough to avoid stair-stepping), useFreshnessRibbon and
+// useVolAdj both OFF (kept as optional toggles, not baked-in assumptions).
+// Compare this plain version first before re-enabling either extra.
+//
+// v3.5 FIX (from another live comparison): the plain v3.4 construction still
+// hugged price, but for a different reason than before — today's real Pro
+// Scalper band was sitting at ~745-748 for hours while today's own price only
+// ranged ~737-741. A window scoped to a single session (vwmaLen=50, ~4hrs)
+// can only ever see today's candles, so it can never reach a level today's
+// price hasn't touched. The real band must be looking back MULTIPLE DAYS,
+// still carrying a recent high (SPY traded near 746-749 on 7/22) that hasn't
+// been revisited. Widened vwmaLen 50->300 (~2-3 trading days on a 5-min
+// chart) to test that directly.
+//
+// v3.6 REDESIGN (user identified the actual mechanism — "ADX Volatility
+// Waves" — after v3.1-v3.5 all guessed blindly off screenshots alone and
+// never converged). This replaces the whole VWMA highest-high/lowest-low
+// construction with a literal implementation of the six components as
+// described:
+//   1. Trend-Weighted Volatility Calculation: wave amplitude is now driven by
+//      ATR SCALED BY ADX (ta.dmi() for ADX), not a plain rolling high/low —
+//      width = ATR * (1 + adxGain * ADX/100), so strong-trend stretches
+//      produce visibly wider waves than choppy ones at the same ATR.
+//   2. Structural Smoothing: the wave width itself is smoothed with ta.rma()
+//      (Wilder smoothing, matching ADX's own internals) before it's used to
+//      place any boundary — stabilizes geometry instead of stair-stepping.
+//   3. Wave Offset & Expansion: zones no longer start AT the equilibrium
+//      (VWMA) line — they're offset beyond it first (baseOffsetMult x
+//      smoothed width), then expand further (expansionMult x smoothed width)
+//      to their outer edge. This is what "positioned beyond equilibrium and
+//      expanded proportionally" describes — a real structural gap, not a
+//      single elastic line.
+//   4. Gradient Wave Depth Mapping: THIS is the "ribbon" effect asked about
+//      across v3.2-v3.5 — it isn't a freshness pulse or a decay curve, it's
+//      literally multiple concentric bands (5 fixed layers here, Pine can't
+//      loop a variable plot() count) between the offset and outer edge, each
+//      filled with increasing opacity outward, so depth into the zone reads
+//      visually as increasing extremity.
+//   5. Wave State Tracking & Cooldown Control: added a real state machine —
+//      once price closes beyond a wave's outer edge, that wave is marked
+//      "active" and won't re-fire a fresh occupancy signal until price
+//      spends `cooldownBars` consecutive bars back inside the neutral zone
+//      (between the two inner offset edges). This replaces v3.2's per-bar
+//      freshness pulse, which was the wrong model — the real thing sounds
+//      event-driven with hysteresis, not continuously decaying.
+//   6. Compression Detection: the smoothed wave width is compared to its own
+//      N-bar range; when it's near its own recent low, a background
+//      highlight flags likely-compression (a new wave is "due") — shown for
+//      reference, not yet wired into any entry/exit logic.
+// This is still an ORIGINAL implementation of a described mechanism, not a
+// copy of source code (which remains invite-only/protected) — exact
+// constants (adxGain, offset/expansion multipliers, cooldown length,
+// compression threshold) are first-pass defaults and need the same visual
+// tuning pass v3.1-v3.5 went through, but the STRUCTURE should now be right
+// instead of guessed.
+//
+// v3.7 CORRECTION (the real indicator's name surfaced by accident — the user
+// was briefly fooled by a lookalike-flags mix-up between it and Pro Scalper):
+// the mechanism in v3.6 is a real, named, OPEN-SOURCE TradingView indicator —
+// "ADX Volatility Waves [BOSWaves]" — confirmed open-source with publicly
+// disclosed suggested defaults (BB Length 20, BB StdDev 1.5, ADX Length 14,
+// ADX Influence 0.8, Wave Offset 1.0, Wave Width 1.0, Neutral Confirmation 5
+// bars). One real structural fix: base volatility is BOLLINGER BAND STANDARD
+// DEVIATION, not ATR — v3.6 guessed ATR, which was wrong. All defaults below
+// updated to the real disclosed values (adxLen=14 and cooldownBars=5 already
+// happened to match the v3.6 guesses; adxGain, baseOffsetMult, expansionMult
+// did not and are corrected now). The full Pine source wasn't retrievable
+// from the public script page (TradingView doesn't expose it to a plain page
+// fetch even for open-source scripts) — if the user can grab it directly from
+// the Pine Editor ("View source" on the indicator), that would let this be
+// matched exactly instead of reconstructed from the disclosed parameter list.
+// Also notable: BOSWaves' own BUY/SELL labels fire on price ENTERING a wave
+// zone (mean-reversion/zone-touch), not on a trend-flip like this script's
+// SuperTrend engine — worth testing later whether Pro Scalper's real entry
+// flags are better explained by a zone-touch model than the currently-fit
+// Kalman SuperTrend (89.2% match on 37 real signals), rather than assuming
+// the two are unrelated. Not changing the entry engine yet — that 89.2% is
+// real fitted evidence and shouldn't be discarded on a single anecdotal
+// flag-collision; flagged as a hypothesis to test if/when source or more
+// side-by-side exports are available.
+//
+// NON-REPAINTING: calc_on_every_tick is disabled — every signal locks in at bar
+// close and won't appear-then-vanish intrabar.
+//
+// Past performance in the Strategy Tester is hypothetical and not indicative of
+// future results. Research/comparison tool only.
+
+//@version=6
+strategy("Pro Scalper Approximation (v3.7 — Kalman SuperTrend + ADX Volatility Waves)", shorttitle="ProScalp~v3.7",
+     overlay=true, calc_on_every_tick=false, process_orders_on_close=true,
+     default_qty_type=strategy.cash, default_qty_value=2000,
+     initial_capital=25000, commission_type=strategy.commission.cash_per_order,
+     commission_value=0, slippage=1, max_labels_count=500)
+
+// ───────────────────────────── Inputs ─────────────────────────────
+
+grpSize = "Position Sizing"
+positionSizeUsd = input.float(3000, "Position size per trade (USD notional of the underlying)", step=100, group=grpSize,
+     tooltip="This sizes a proxy position in SPY SHARES, not option contracts — Pine's strategy engine has no concept of option premium/delta/theta/gamma. Use this backtest to judge entry/exit TIMING logic, not as a stand-in for real options P&L. Keep this well under initial_capital.")
+
+grpCore = "Kalman-Filtered SuperTrend Core"
+useKalman = input.bool(true, "Use Kalman-filtered price as SuperTrend basis", group=grpCore,
+     tooltip="On = v3 engine (smooths price through a Kalman filter before computing the trend bands, matching Pro Scalper's disclosed 'Kalman-adapted Supertrend' approach). Off = falls back to the old v2 behavior (bands centered on hl2) for A/B comparison.")
+kfQ = input.float(0.01, "Kalman Process Noise (Q)", step=0.001, group=grpCore,
+     tooltip="Higher = trusts new price more, tracks faster but noisier. Grid-searched jointly with R, atrPeriod, factor against 37 real RTH Pro Scalper flags.")
+kfR = input.float(0.2, "Kalman Measurement Noise (R)", step=0.01, group=grpCore,
+     tooltip="Higher = trusts the filter's own estimate more, smooths harder. What matters most is the Q/R ratio, not either value alone.")
+stFactor = input.float(2.0, "Factor (band multiplier)", step=0.1, group=grpCore,
+     tooltip="Best-fit value from a grid search against 37 real RTH Pro Scalper flags across 22 days, using the Kalman-filtered engine (33/37 = 89.2% match).")
+stAtrPeriod = input.int(7, "ATR Period", group=grpCore,
+     tooltip="Best-fit value from the same grid search.")
+
+grpSess = "Session Filter"
+useSession   = input.bool(true, "Restrict entries to regular trading hours", group=grpSess,
+     tooltip="Options only execute during RTH, so non-RTH flips aren't actionable even though the trend state keeps computing through them.")
+sessionInput = input.session("0930-1600", "Session (exchange time)", group=grpSess)
+
+grpZone = "ADX Volatility Wave Zones (exit reference)"
+waveEquilLen = input.int(50, "Equilibrium (VWMA) Length", group=grpZone,
+     tooltip="Lookback for the equilibrium/basis line the waves are measured from. Kept as VWMA — even the real disclosed defaults below don't specify the equilibrium line itself, only how the wave zones are placed relative to it.")
+bbLen = input.int(20, "Bollinger Band Length (base volatility)", group=grpZone,
+     tooltip="v3.7 CORRECTION: identified the real indicator by name (BOSWaves' 'ADX Volatility Waves') and its publicly disclosed suggested defaults. Base volatility is Bollinger Band standard deviation, NOT ATR — v3.6 guessed ATR, which was wrong. Real default: BB Length 20.")
+bbMult = input.float(1.5, "Bollinger Band StdDev multiplier", step=0.1, group=grpZone,
+     tooltip="Real disclosed default: BB StdDev 1.5.")
+adxLen = input.int(14, "ADX Length", group=grpZone,
+     tooltip="Real disclosed default: ADX Length 14 — matches what v3.6 already guessed.")
+diLen = input.int(14, "DI Length", group=grpZone)
+adxGain = input.float(0.8, "ADX amplitude gain (real default: ADX Influence)", step=0.1, group=grpZone,
+     tooltip="'Trend-Weighted Volatility Calculation': wave amplitude = (BB stdev * bbMult) * (1 + adxGain * ADX/100). Real disclosed default: ADX Influence 0.8 (v3.6 had guessed 1.0).")
+waveSmoothLen = input.int(10, "Structural smoothing length", group=grpZone,
+     tooltip="'Structural Smoothing': ta.rma() (Wilder-style, matching ADX's own smoothing) applied to the wave width before it sets any boundary, to stabilize wave geometry and reduce short-term distortions. Not called out with a specific default in the public listing — still a first-pass guess.")
+baseOffsetMult = input.float(1.0, "Base offset beyond equilibrium (x smoothed width)", step=0.1, group=grpZone,
+     tooltip="'Wave Offset': how far beyond the equilibrium line the wave zone STARTS — a real gap, not a zone that hugs the basis line. Real disclosed default: Wave Offset 1.0 (v3.6 had guessed 0.5).")
+expansionMult = input.float(1.0, "Wave expansion (x smoothed width)", step=0.1, group=grpZone,
+     tooltip="'Wave Expansion': how much further the outer edge extends past the base offset, proportional to the (ADX-weighted, smoothed) volatility range. Real disclosed default: Wave Width 1.0 (v3.6 had guessed 1.5).")
+cooldownBars = input.int(5, "Neutral stabilization bars (cooldown)", group=grpZone,
+     tooltip="'Wave State Tracking & Cooldown Control': once price closes beyond a wave's outer edge that wave is marked active and won't fire a fresh occupancy signal again until price spends this many consecutive bars back inside the neutral (inner-offset) zone. Real disclosed default: Neutral Confirmation 5 bars — matches what v3.6 already guessed.")
+compressionLookback = input.int(50, "Compression lookback (bars)", group=grpZone)
+compressionPct = input.float(0.3, "Compression threshold (fraction of N-bar width range)", step=0.05, group=grpZone,
+     tooltip="'Compression Detection': flags compression when current wave width is within this fraction of its own N-bar low — highlighting where a new wave is likely to form. Reference only, not wired into entries/exits yet.")
+useZoneExit = input.bool(true, "Exit position when price touches the opposite wave's outer edge", group=grpZone,
+     tooltip="Closes a long the moment price tags the upper wave's outer edge, or a short the moment price tags the lower wave's outer edge — an alternative/companion to the ATR bracket below.")
+showZoneBands = input.bool(true, "Show wave gradient bands on chart", group=grpZone)
+showCompression = input.bool(true, "Show compression background highlight", group=grpZone)
+showTpMarkers = input.bool(true, "Show TP exhaustion markers", group=grpZone,
+     tooltip="Visual-only reference marker: a lower high while an upper wave is active (long side) or a higher low while a lower wave is active (short side) — for comparing against Pro Scalper's real TP 'X' markers.")
+
+grpExit = "ATR Bracket Exit (Strategy Tester only)"
+stopAtrMult = input.float(1.5, "Initial Stop = N x ATR (fixed at entry)", step=0.1, group=grpExit)
+targetAtrMult = input.float(2.0, "Profit Target = N x ATR (fixed at entry)", step=0.1, group=grpExit)
+useBreakeven = input.bool(true, "Move stop to breakeven once favorable move hits N x ATR", group=grpExit)
+breakevenAtrMult = input.float(1.0, "Breakeven trigger = N x ATR", step=0.1, group=grpExit)
+useTimeStop = input.bool(true, "Time stop: close if neither target nor stop hit in N bars", group=grpExit)
+maxBarsInTrade = input.int(12, "Max bars in trade", group=grpExit)
+
+grpDisp = "Display"
+showRefLines = input.bool(true, "Show SuperTrend band as reference line", group=grpDisp)
+showDashboard = input.bool(true, "Show status table", group=grpDisp)
+showTradeLevels = input.bool(true, "Show entry/stop/target lines for open trade", group=grpDisp,
+     tooltip="Plots the ATR bracket's live entry price, current stop (tracks the breakeven move once triggered), and fixed profit target for whichever position is currently open. Nothing plots while flat.")
+
+// ───────────────────────────── Kalman filter ─────────────────────────────
+
+var float kfEstimate = na
+var float kfError = 1.0
+
+if na(kfEstimate)
+    kfEstimate := close
+kfErrorPred = kfError + kfQ
+kalmanGain = kfErrorPred / (kfErrorPred + kfR)
+kfEstimate := kfEstimate + kalmanGain * (close - kfEstimate)
+kfError := (1 - kalmanGain) * kfErrorPred
+
+// ───────────────────────────── Custom SuperTrend (Kalman-basis) ─────────────────────────────
+// ta.supertrend() can't accept a custom source, so this replicates its exact
+// band/flip recurrence by hand, using either the Kalman estimate or hl2 as the
+// centerline.
+
+atrVal = ta.atr(stAtrPeriod)
+basisSrc = useKalman ? kfEstimate : hl2
+upBasic = basisSrc - stFactor * atrVal
+dnBasic = basisSrc + stFactor * atrVal
+
+var float upBand = na
+var float dnBand = na
+var int trendState = 1
+
+upBand := na(upBand[1]) ? upBasic : (close[1] > upBand[1] ? math.max(upBasic, upBand[1]) : upBasic)
+dnBand := na(dnBand[1]) ? dnBasic : (close[1] < dnBand[1] ? math.min(dnBasic, dnBand[1]) : dnBasic)
+trendState := na(trendState[1]) ? 1 :
+     (trendState[1] == -1 and close > dnBand[1] ? 1 :
+      trendState[1] == 1  and close < upBand[1] ? -1 :
+      trendState[1])
+
+isUptrend = trendState == 1
+stLine = isUptrend ? upBand : dnBand
+
+flippedLong  = trendState == 1  and trendState[1] == -1
+flippedShort = trendState == -1 and trendState[1] == 1
+
+inSession = not useSession or not na(time(timeframe.period, sessionInput))
+
+longSignal  = flippedLong  and inSession
+shortSignal = flippedShort and inSession
+
+// ───────────────────────────── ADX Volatility Wave zones ─────────────────────────────
+// v3.6: literal implementation of the six described components. See header.
+// v3.7: identified the real indicator by name (user recognized its flags as
+// identical to Pro Scalper's own) — "ADX Volatility Waves [BOSWaves]" on
+// TradingView, confirmed open-source with publicly disclosed suggested
+// defaults. One structural correction: base volatility is Bollinger Band
+// standard deviation, NOT ATR as v3.6 guessed.
+
+waveEquilibrium = ta.vwma(close, waveEquilLen)
+bbStdev = ta.stdev(close, bbLen) * bbMult
+[diPlus, diMinus, adxVal] = ta.dmi(diLen, adxLen)
+
+// 1. Trend-Weighted Volatility Calculation
+adxNorm  = adxVal / 100
+rawWidth = bbStdev * (1 + adxGain * adxNorm)
+
+// 2. Structural Smoothing (Wilder/RMA — matches ADX's own internal smoothing)
+waveWidth = ta.rma(rawWidth, waveSmoothLen)
+
+// 3. Wave Offset & Expansion — zones start BEYOND equilibrium, then expand
+upperInner = waveEquilibrium + baseOffsetMult * waveWidth
+upperOuter = waveEquilibrium + (baseOffsetMult + expansionMult) * waveWidth
+lowerInner = waveEquilibrium - baseOffsetMult * waveWidth
+lowerOuter = waveEquilibrium - (baseOffsetMult + expansionMult) * waveWidth
+
+isOverbought = close >= upperOuter
+isOversold   = close <= lowerOuter
+
+// 4. Gradient Wave Depth Mapping — 5 fixed concentric layers between the
+// offset (inner) edge and the expanded (outer) edge. Pine can't loop a
+// variable plot() count, so the layer count is fixed rather than an input.
+upperL1 = upperInner
+upperL2 = waveEquilibrium + (baseOffsetMult + expansionMult * 0.25) * waveWidth
+upperL3 = waveEquilibrium + (baseOffsetMult + expansionMult * 0.50) * waveWidth
+upperL4 = waveEquilibrium + (baseOffsetMult + expansionMult * 0.75) * waveWidth
+upperL5 = upperOuter
+
+lowerL1 = lowerInner
+lowerL2 = waveEquilibrium - (baseOffsetMult + expansionMult * 0.25) * waveWidth
+lowerL3 = waveEquilibrium - (baseOffsetMult + expansionMult * 0.50) * waveWidth
+lowerL4 = waveEquilibrium - (baseOffsetMult + expansionMult * 0.75) * waveWidth
+lowerL5 = lowerOuter
+
+// 5. Wave State Tracking & Cooldown Control
+var bool longWaveActive  = false
+var bool shortWaveActive = false
+var int  neutralBars      = 0
+
+inNeutral    = close < upperInner and close > lowerInner
+newLongWave  = isOverbought and not longWaveActive
+newShortWave = isOversold   and not shortWaveActive
+
+if newLongWave
+    longWaveActive := true
+if newShortWave
+    shortWaveActive := true
+
+neutralBars := inNeutral ? neutralBars + 1 : 0
+if neutralBars >= cooldownBars
+    longWaveActive := false
+    shortWaveActive := false
+
+// 6. Compression Detection — current wave width vs. its own recent range
+widthLowest  = ta.lowest(waveWidth, compressionLookback)
+widthHighest = ta.highest(waveWidth, compressionLookback)
+widthRange   = widthHighest - widthLowest
+isCompressed = widthRange > 0 and (waveWidth - widthLowest) <= widthRange * compressionPct
+
+longTPSignal  = strategy.position_size > 0 and longWaveActive  and isOverbought and high < high[1]
+shortTPSignal = strategy.position_size < 0 and shortWaveActive and isOversold   and low  > low[1]
+
+// ───────────────────────────── Plotting ─────────────────────────────
+
+plotshape(longSignal,  title="BUY",  style=shape.triangleup,   location=location.belowbar,
+     color=color.new(color.green, 0), size=size.small)
+plotshape(shortSignal, title="SELL", style=shape.triangledown, location=location.abovebar,
+     color=color.new(color.red, 0),   size=size.small)
+
+plot(showRefLines ? stLine : na, "SuperTrend Band",
+     color=isUptrend ? color.new(color.green, 40) : color.new(color.red, 40), style=plot.style_linebr, linewidth=2)
+
+pBasis = plot(showZoneBands ? waveEquilibrium : na, "Equilibrium (VWMA)", color=color.new(color.gray, 80), display=display.none)
+
+// Gradient wave depth mapping: 5 concentric layers per side, opacity rising
+// outward (lower transparency number = more opaque/intense) so depth into
+// the zone visually reads as increasing extremity — this is the "ribbon".
+pU1 = plot(showZoneBands ? upperL1 : na, "Wave Upper L1", display=display.none)
+pU2 = plot(showZoneBands ? upperL2 : na, "Wave Upper L2", display=display.none)
+pU3 = plot(showZoneBands ? upperL3 : na, "Wave Upper L3", display=display.none)
+pU4 = plot(showZoneBands ? upperL4 : na, "Wave Upper L4", display=display.none)
+pU5 = plot(showZoneBands ? upperL5 : na, "Wave Upper Outer", color=color.new(color.red, 35))
+
+pL1 = plot(showZoneBands ? lowerL1 : na, "Wave Lower L1", display=display.none)
+pL2 = plot(showZoneBands ? lowerL2 : na, "Wave Lower L2", display=display.none)
+pL3 = plot(showZoneBands ? lowerL3 : na, "Wave Lower L3", display=display.none)
+pL4 = plot(showZoneBands ? lowerL4 : na, "Wave Lower L4", display=display.none)
+pL5 = plot(showZoneBands ? lowerL5 : na, "Wave Lower Outer", color=color.new(color.green, 35))
+
+fill(pU1, pU2, color=color.new(color.red, 90), title="Upper Gradient 1 (innermost)")
+fill(pU2, pU3, color=color.new(color.red, 80), title="Upper Gradient 2")
+fill(pU3, pU4, color=color.new(color.red, 68), title="Upper Gradient 3")
+fill(pU4, pU5, color=color.new(color.red, 52), title="Upper Gradient 4 (outermost)")
+
+fill(pL1, pL2, color=color.new(color.green, 90), title="Lower Gradient 1 (innermost)")
+fill(pL2, pL3, color=color.new(color.green, 80), title="Lower Gradient 2")
+fill(pL3, pL4, color=color.new(color.green, 68), title="Lower Gradient 3")
+fill(pL4, pL5, color=color.new(color.green, 52), title="Lower Gradient 4 (outermost)")
+
+bgcolor(showCompression and isCompressed ? color.new(color.yellow, 85) : na, title="Compression Highlight")
+
+plotshape(showTpMarkers and newLongWave,  title="Wave Entry (Upper)", style=shape.circle, location=location.abovebar,
+     color=color.new(color.red, 20), size=size.tiny)
+plotshape(showTpMarkers and newShortWave, title="Wave Entry (Lower)", style=shape.circle, location=location.belowbar,
+     color=color.new(color.green, 20), size=size.tiny)
+plotshape(showTpMarkers and longTPSignal,  title="TP (Long)",  style=shape.xcross, location=location.abovebar,
+     color=color.new(color.orange, 0), size=size.tiny)
+plotshape(showTpMarkers and shortTPSignal, title="TP (Short)", style=shape.xcross, location=location.belowbar,
+     color=color.new(color.orange, 0), size=size.tiny)
+
+alertcondition(longSignal,  title="Buy Flag",  message="{{ticker}} BUY signal on {{interval}} at {{close}}")
+alertcondition(shortSignal, title="Sell Flag", message="{{ticker}} SELL signal on {{interval}} at {{close}}")
+
+// ───────────────────────────── Strategy entries/exits (Tester feedback only) ─────────────────────────────
+
+if longSignal
+    strategy.entry("Long", strategy.long, qty=positionSizeUsd/close)
+if shortSignal
+    strategy.entry("Short", strategy.short, qty=positionSizeUsd/close)
+
+var float entryPrice = na
+var float entryAtr   = na
+var int   entryBar   = na
+var bool  beTriggered = false
+
+if longSignal or shortSignal
+    entryPrice := close
+    entryAtr   := atrVal
+    entryBar   := bar_index
+    beTriggered := false
+
+if strategy.position_size > 0 and not beTriggered and not na(entryAtr) and high >= entryPrice + entryAtr * breakevenAtrMult
+    beTriggered := true
+if strategy.position_size < 0 and not beTriggered and not na(entryAtr) and low <= entryPrice - entryAtr * breakevenAtrMult
+    beTriggered := true
+
+longInitialStop  = entryPrice - entryAtr * stopAtrMult
+shortInitialStop = entryPrice + entryAtr * stopAtrMult
+longTarget       = entryPrice + entryAtr * targetAtrMult
+shortTarget      = entryPrice - entryAtr * targetAtrMult
+
+longStopFinal  = useBreakeven and beTriggered ? entryPrice : longInitialStop
+shortStopFinal = useBreakeven and beTriggered ? entryPrice : shortInitialStop
+
+strategy.exit("Long Stop",   from_entry="Long",  stop=longStopFinal)
+strategy.exit("Long Target", from_entry="Long",  limit=longTarget)
+strategy.exit("Short Stop",  from_entry="Short", stop=shortStopFinal)
+strategy.exit("Short Target",from_entry="Short", limit=shortTarget)
+
+if useZoneExit and strategy.position_size > 0 and isOverbought
+    strategy.close("Long", comment="OB Zone Exit")
+if useZoneExit and strategy.position_size < 0 and isOversold
+    strategy.close("Short", comment="OS Zone Exit")
+
+if useTimeStop and strategy.position_size != 0 and not na(entryBar) and (bar_index - entryBar) >= maxBarsInTrade
+    strategy.close_all(comment="Time stop")
+
+// ───────────────────────────── Trade level plots (entry / stop / target) ─────────────────────────────
+// Only draws while a position is open on that side; na (nothing plotted) while flat.
+
+tradeEntryPlot  = strategy.position_size != 0 ? entryPrice : na
+tradeStopPlot   = strategy.position_size > 0 ? longStopFinal  : strategy.position_size < 0 ? shortStopFinal : na
+tradeTargetPlot = strategy.position_size > 0 ? longTarget     : strategy.position_size < 0 ? shortTarget    : na
+
+plot(showTradeLevels ? tradeEntryPlot : na, "Entry Price",
+     color=color.new(color.gray, 20), style=plot.style_linebr, linewidth=1)
+plot(showTradeLevels ? tradeStopPlot : na, "Stop Loss",
+     color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+plot(showTradeLevels ? tradeTargetPlot : na, "Take Profit",
+     color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+
+// One-time labels at the bar a trade opens, showing the initial (pre-breakeven)
+// stop and target levels so they're readable even without hovering the lines.
+if showTradeLevels and longSignal
+    label.new(bar_index, longInitialStop, "SL " + str.tostring(longInitialStop, "#.##"),
+         style=label.style_label_up, color=color.new(color.red, 15), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, longTarget, "TP " + str.tostring(longTarget, "#.##"),
+         style=label.style_label_down, color=color.new(color.green, 15), textcolor=color.white, size=size.tiny)
+if showTradeLevels and shortSignal
+    label.new(bar_index, shortInitialStop, "SL " + str.tostring(shortInitialStop, "#.##"),
+         style=label.style_label_down, color=color.new(color.red, 15), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, shortTarget, "TP " + str.tostring(shortTarget, "#.##"),
+         style=label.style_label_up, color=color.new(color.green, 15), textcolor=color.white, size=size.tiny)
+
+// ───────────────────────────── Dashboard ─────────────────────────────
+
+var table dash = table.new(position.top_right, 2, 6, border_width=1)
+
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "Trend State", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 0, isUptrend ? "Up (long)" : "Down (short)",
+         bgcolor=isUptrend ? color.new(color.green, 60) : color.new(color.red, 60))
+
+    table.cell(dash, 0, 1, "ATR", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 1, str.tostring(atrVal, "#.##"))
+
+    table.cell(dash, 0, 2, "In Session", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 2, inSession ? "Yes" : "No",
+         bgcolor=inSession ? color.new(color.green, 60) : color.new(color.red, 60))
+
+    zoneLabel = isOverbought ? "Overbought" : isOversold ? "Oversold" : "Neutral"
+    zoneColor = isOverbought ? color.new(color.red, 60) : isOversold ? color.new(color.green, 60) : color.new(color.gray, 70)
+    table.cell(dash, 0, 3, "Wave Zone", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 3, zoneLabel, bgcolor=zoneColor)
+
+    table.cell(dash, 0, 4, "ADX", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 4, str.tostring(adxVal, "#.#"))
+
+    table.cell(dash, 0, 5, "Compression", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 5, isCompressed ? "Yes (wave due)" : "No",
+         bgcolor=isCompressed ? color.new(color.yellow, 50) : color.new(color.gray, 70))
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+plot(close)

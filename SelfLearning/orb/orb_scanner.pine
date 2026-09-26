@@ -1,0 +1,242 @@
+//@version=6
+// =============================================================================
+//  ORB Confluence Scanner  —  Multi-Symbol Dashboard (Dynamic Watchlist)
+//  Companion to "ORB Confluence Pro". Runs the same Opening Range Breakout
+//  logic across a user-defined watchlist and renders a status table.
+//
+//  Watchlist is a single text box (one ticker per line OR comma-separated) so
+//  adding / removing symbols is trivial. Uses Pine v6 dynamic requests to loop
+//  request.security() over the list.
+//
+//  Per symbol: last price, OR status (building / inside / broke), directional
+//  bias (2-candle confirmation), VWAP alignment, volume surge, A/B/C grade.
+//
+//  NOTE: Use a 1m-5m chart timeframe so each symbol's opening range forms.
+//  Keep the list to ~40 symbols (TradingView request limit).
+// =============================================================================
+indicator("ORB Confluence Scanner [Dynamic]", shorttitle="ORB Scan", overlay=true, dynamic_requests=true)
+
+// ============================ INPUTS =========================================
+grpOR = "Opening Range"
+orChoice = input.string("15", "OR Duration (min)", options = ["5", "15", "30"], group = grpOR)
+sess     = input.session("0930-1600", "Regular Session", group = grpOR)
+tz       = input.string("America/New_York", "Session Timezone", group = grpOR)
+
+grpConf = "Confluence"
+useVWAP = input.bool(true, "Use VWAP in grade", group = grpConf)
+useVol  = input.bool(true, "Use Volume in grade", group = grpConf)
+volLen  = input.int(20, "Volume MA Length", minval = 1, group = grpConf)
+volMult = input.float(1.5, "Volume Surge Multiplier", minval = 0.1, step = 0.1, group = grpConf)
+
+grpSym = "Watchlist"
+symText = input.text_area("AMEX:SPY\nSP:SPX\nNASDAQ:QQQ\nNASDAQ:AAPL\nNASDAQ:MSFT\nNASDAQ:GOOGL\nNASDAQ:AMZN\nNASDAQ:NVDA\nNASDAQ:META\nNASDAQ:TSLA", "Tickers (one per line or comma-separated)", group = grpSym)
+
+grpUI = "Dashboard"
+tblPos  = input.string("Top Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpUI)
+txtSize = input.string("Small", "Text Size", options = ["Tiny", "Small", "Normal"], group = grpUI)
+sortOn  = input.bool(true, "Sort by signal strength (A-grade breakouts on top)", group = grpUI)
+
+orMin = int(str.tonumber(orChoice))
+orMs  = orMin * 60 * 1000
+
+// ============================ PER-SYMBOL ORB ENGINE ==========================
+// Returns: [orHigh, orLow, lastClose, status(-1/0/1), bias(-1/0/1),
+//           vwapAbove(bool), volSurge(bool), locked(bool)]
+f_orb() =>
+    t       = time(timeframe.period, sess, tz)
+    inSess  = not na(t)
+    newSess = inSess and (na(t[1]) or not inSess[1])
+
+    var float orH      = na
+    var float orL      = na
+    var int   sessOpen = na
+    var bool  locked   = false
+    var int   dir      = 0
+    var bool  pUp      = false
+    var bool  pDn      = false
+    var float cH       = na
+    var float cL       = na
+    var int   cBar     = na
+
+    if newSess
+        orH      := high
+        orL      := low
+        sessOpen := t
+        locked   := false
+        dir      := 0
+        pUp      := false
+        pDn      := false
+
+    inWindow = inSess and not na(sessOpen) and (t - sessOpen < orMs)
+    if inWindow and not newSess
+        orH := math.max(orH, high)
+        orL := math.min(orL, low)
+
+    if (not locked) and not na(orH) and not na(sessOpen) and (t - sessOpen >= orMs)
+        locked := true
+
+    crossUp = locked and inSess and close > orH and close[1] <= orH
+    crossDn = locked and inSess and close < orL and close[1] >= orL
+    if crossUp
+        pUp := true
+        pDn := false
+        cH  := high
+        cBar := bar_index
+    if crossDn
+        pDn := true
+        pUp := false
+        cL  := low
+        cBar := bar_index
+
+    confUp = pUp and bar_index > cBar and close > open and close > cH
+    confDn = pDn and bar_index > cBar and close < open and close < cL
+    if confUp
+        dir := 1
+        pUp := false
+    if confDn
+        dir := -1
+        pDn := false
+
+    vwapVal  = ta.vwap
+    volMA    = ta.sma(volume, volLen)
+    volSurge = volume > volMA * volMult
+    status   = not locked ? 0 : close > orH ? 1 : close < orL ? -1 : 0
+    [orH, orL, close, status, dir, close > vwapVal, volSurge, locked]
+
+// ============================ PARSE WATCHLIST ================================
+// Normalise: commas -> newlines, strip carriage returns & spaces, drop blanks.
+f_parse(string raw) =>
+    tmp  = str.replace_all(raw, ",", "\n")
+    tmp2 = str.replace_all(tmp, "\r", "")
+    tmp3 = str.replace_all(tmp2, " ", "")
+    parts = str.split(tmp3, "\n")
+    out = array.new_string()
+    if array.size(parts) > 0
+        for i = 0 to array.size(parts) - 1
+            p = array.get(parts, i)
+            if str.length(p) > 0
+                array.push(out, str.upper(p))
+    out
+
+symbols = f_parse(symText)
+n = array.size(symbols)
+
+// ============================ FETCH (dynamic loop) ===========================
+var names = array.new_string()
+var lasts = array.new_float()
+var sts   = array.new_int()
+var dirs  = array.new_int()
+var vas   = array.new_bool()
+var vss   = array.new_bool()
+var lks   = array.new_bool()
+var scores = array.new_float()
+
+array.clear(names)
+array.clear(lasts)
+array.clear(sts)
+array.clear(dirs)
+array.clear(vas)
+array.clear(vss)
+array.clear(lks)
+array.clear(scores)
+
+if n > 0
+    for i = 0 to n - 1
+        sym = array.get(symbols, i)
+        [h, l, c, st, d, va, vs, lk] = request.security(sym, timeframe.period, f_orb(), ignore_invalid_symbol = true)
+        cst = na(st) ? 0 : st
+        cd  = na(d) ? 0 : d
+        cva = va ? true : false
+        cvs = vs ? true : false
+        clk = lk ? true : false
+        // rank score: grade points * 10 + breakout/bias bonuses (higher = stronger)
+        eff = cd != 0 ? cd : cst
+        float score = 0.0
+        if eff != 0
+            vwapAlign = eff == 1 ? cva : not cva
+            pts = 1 + (useVWAP and vwapAlign ? 1 : 0) + (useVol and cvs ? 1 : 0)
+            score := pts * 10 + (cd != 0 ? 5 : 0) + (cst != 0 ? 2 : 0)
+        array.push(names, sym)
+        array.push(lasts, na(c) ? na : c)
+        array.push(sts, cst)
+        array.push(dirs, cd)
+        array.push(vas, cva)
+        array.push(vss, cvs)
+        array.push(lks, clk)
+        array.push(scores, score)
+
+// ============================ DASHBOARD ======================================
+f_pos() =>
+    tblPos == "Top Left"     ? position.top_left     :
+     tblPos == "Bottom Right" ? position.bottom_right :
+     tblPos == "Bottom Left"  ? position.bottom_left  :
+     position.top_right
+
+f_size() =>
+    txtSize == "Tiny" ? size.tiny : txtSize == "Normal" ? size.normal : size.small
+
+f_cleanName(string s) =>
+    arr = str.split(s, ":")
+    array.size(arr) > 1 ? array.get(arr, 1) : s
+
+f_statusTxt(int st, bool lk) =>
+    not lk ? "Building" : st == 1 ? "Broke ▲" : st == -1 ? "Broke ▼" : "Inside"
+
+f_statusCol(int st, bool lk) =>
+    not lk ? color.gray : st == 1 ? color.green : st == -1 ? color.red : color.new(color.gray, 30)
+
+f_bias(int d) =>
+    d == 1 ? "BULL" : d == -1 ? "BEAR" : "-"
+
+f_biasCol(int d) =>
+    d == 1 ? color.green : d == -1 ? color.red : color.gray
+
+f_grade(int st, int d, bool va, bool vs) =>
+    eff = d != 0 ? d : st
+    string g = "-"
+    if eff != 0
+        vwapAlign = eff == 1 ? va : not va
+        pts    = 1 + (useVWAP and vwapAlign ? 1 : 0) + (useVol and vs ? 1 : 0)
+        maxPts = 1 + (useVWAP ? 1 : 0) + (useVol ? 1 : 0)
+        g := pts == maxPts ? "A" : pts >= maxPts - 1 ? "B" : "C"
+    g
+
+f_gradeCol(string g) =>
+    g == "A" ? color.green : g == "B" ? color.yellow : g == "C" ? color.orange : color.gray
+
+// ============================ RENDER DASHBOARD ===============================
+var table dash = na
+if barstate.islast
+    if not na(dash)
+        table.delete(dash)
+    rows = array.size(names) + 1
+    dash := table.new(f_pos(), 7, rows, border_width = 1, frame_color = color.gray, frame_width = 1)
+    hb = color.new(color.blue, 0)
+    table.cell(dash, 0, 0, "Symbol", text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 1, 0, "Last",   text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 2, 0, str.tostring(orMin) + "m ORB", text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 3, 0, "Bias",   text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 4, 0, "VWAP",   text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 5, 0, "Vol",    text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 6, 0, "Grade",  text_color = color.white, bgcolor = hb, text_size = f_size())
+
+    if array.size(names) > 0
+        order = sortOn ? array.sort_indices(scores, order.descending) : na
+        for i = 0 to array.size(names) - 1
+            idx = na(order) ? i : array.get(order, i)
+            r   = i + 1
+            sym = array.get(names, idx)
+            c   = array.get(lasts, idx)
+            st  = array.get(sts, idx)
+            d   = array.get(dirs, idx)
+            va  = array.get(vas, idx)
+            vs  = array.get(vss, idx)
+            lk  = array.get(lks, idx)
+            g   = f_grade(st, d, va, vs)
+            table.cell(dash, 0, r, f_cleanName(sym), text_color = color.white, text_size = f_size())
+            table.cell(dash, 1, r, na(c) ? "n/a" : str.tostring(c, format.mintick), text_color = color.white, text_size = f_size())
+            table.cell(dash, 2, r, f_statusTxt(st, lk), text_color = color.white, bgcolor = color.new(f_statusCol(st, lk), 55), text_size = f_size())
+            table.cell(dash, 3, r, f_bias(d), text_color = f_biasCol(d), text_size = f_size())
+            table.cell(dash, 4, r, va ? "▲" : "▼", text_color = va ? color.green : color.red, text_size = f_size())
+            table.cell(dash, 5, r, vs ? "✓" : "·", text_color = vs ? color.green : color.gray, text_size = f_size())
+            table.cell(dash, 6, r, g, text_color = f_gradeCol(g), text_size = f_size())

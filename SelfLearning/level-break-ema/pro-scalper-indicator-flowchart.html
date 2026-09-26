@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pro Scalper v3.7 INDICATOR — Signals / Timing / Exits / Stops</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #161b22;
+    --panel2: #1c2330;
+    --border: #2d3542;
+    --text: #e6edf3;
+    --muted: #9aa7b4;
+    --green: #2ea043;
+    --red: #f85149;
+    --amber: #d29922;
+    --blue: #388bfd;
+    --purple: #a371f7;
+    --teal: #39c5cf;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    padding: 28px 32px;
+    background: linear-gradient(135deg, #161b22, #0e1117);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0 0 6px; font-size: 24px; }
+  header p { margin: 0; color: var(--muted); font-size: 14px; max-width: 940px; }
+  .badge {
+    display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .5px;
+    background: rgba(57,197,207,.16); color: var(--teal); border: 1px solid rgba(57,197,207,.4);
+    padding: 3px 10px; border-radius: 20px; margin-bottom: 10px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 32px 80px; }
+  section { margin-top: 40px; }
+  h2 {
+    font-size: 19px;
+    border-left: 4px solid var(--blue);
+    padding-left: 12px;
+    margin-bottom: 4px;
+  }
+  h2.entry { border-color: var(--green); }
+  h2.exit  { border-color: var(--red); }
+  h2.stop  { border-color: var(--amber); }
+  h2.zone  { border-color: var(--purple); }
+  h2.time  { border-color: var(--teal); }
+  .lead { color: var(--muted); font-size: 14px; margin: 6px 0 18px; }
+  .diagram {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    overflow-x: auto;
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 16px; }
+  .card {
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .card p { margin: 0; font-size: 13px; color: var(--muted); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  code {
+    background: #0b0f14;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 12.5px;
+    color: #d2a8ff;
+  }
+  table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; background: var(--panel2); }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 20px; font-weight: 600; white-space: nowrap; }
+  .pill.g { background: rgba(46,160,67,.18); color: #56d364; }
+  .pill.r { background: rgba(248,81,73,.18); color: #ff7b72; }
+  .pill.a { background: rgba(210,153,34,.18); color: #e3b341; }
+  .pill.t { background: rgba(57,197,207,.18); color: #56d4dd; }
+  .note {
+    margin-top: 22px;
+    background: rgba(56,139,253,.08);
+    border: 1px solid rgba(56,139,253,.3);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 13px;
+    color: #c9d6e3;
+  }
+  .warn {
+    margin-top: 22px;
+    background: rgba(210,153,34,.08);
+    border: 1px solid rgba(210,153,34,.35);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 13px;
+    color: #e8d9b5;
+  }
+  .disclaimer { margin-top: 30px; font-size: 12px; color: #6e7681; border-top: 1px solid var(--border); padding-top: 16px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="badge">INDICATOR PORT · v3.7</span>
+  <h1>Pro Scalper Approximation — Indicator: Signals, Timing, Exits &amp; Stops</h1>
+  <p>Logic map for the <strong>indicator() conversion</strong>. Same Kalman-SuperTrend engine and ADX Volatility Wave zones as the strategy, but strategy orders are replaced by a <strong>virtual-position state machine</strong>, and a new <strong>Signal Timing</strong> layer addresses the "one candle lag": Confirmed vs Real-time flags plus anticipatory early-warning diamonds.</p>
+</header>
+
+<div class="wrap">
+
+  <!-- OVERVIEW -->
+  <section>
+    <h2>1 · End-to-End Overview (Indicator)</h2>
+    <p class="lead">Bar data → engine recomputes trend + waves → the <em>timing gate</em> decides when a flip becomes a flag → virtual position opens → four exit conditions manage it → alerts fire (no orders placed).</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart LR
+    A[Bar data] --> B[Kalman filter]
+    B --> C[Custom SuperTrend<br/>trend state + bands]
+    A --> D[ADX Volatility<br/>Wave zones]
+    C --> T{Signal Timing<br/>gate}
+    T -- "Confirmed<br/>(bar close)" --> E{Flip?}
+    T -- "Real-time<br/>(intrabar)" --> E
+    C --> WN{Near flip<br/>band?}
+    WN -- yes --> WD([Early-warning ◆])
+    E -- "flip up" --> F([BUY ▲])
+    E -- "flip down" --> G([SELL ▼])
+    F --> V[Virtual position = LONG]
+    G --> V2[Virtual position = SHORT]
+    V --> K[Exit manager]
+    V2 --> K
+    D --> K
+    K --> L([Position flat + exit alert])
+
+    classDef sig fill:#132a17,stroke:#2ea043,color:#e6edf3;
+    classDef ex fill:#2a1414,stroke:#f85149,color:#e6edf3;
+    classDef warn fill:#2a2411,stroke:#d29922,color:#e6edf3;
+    class F,G sig;
+    class L ex;
+    class WD warn;
+      </pre>
+    </div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--green)"></span> Entry / BUY</span>
+      <span><span class="dot" style="background:var(--red)"></span> Exit / SELL</span>
+      <span><span class="dot" style="background:var(--amber)"></span> Early-warning</span>
+      <span><span class="dot" style="background:var(--teal)"></span> Timing gate</span>
+      <span><span class="dot" style="background:var(--purple)"></span> Wave zones</span>
+    </div>
+  </section>
+
+  <!-- SIGNAL TIMING (NEW) -->
+  <section>
+    <h2 class="time">2 · Signal Timing — the "lag vs. lead" lever <span class="pill t">NEW</span></h2>
+    <p class="lead">This is the layer added in the indicator. It decides <strong>when a SuperTrend flip is allowed to become a visible flag</strong>, and adds an anticipatory pre-signal that leads the confirmed flip.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    FLIP[SuperTrend trend<br/>state changed this bar] --> MODE{Flag timing<br/>mode}
+    MODE -- "Confirmed (no repaint)" --> CB{"barstate.isconfirmed?<br/>(bar closed)"}
+    MODE -- "Real-time (leading)" --> RT["Fire NOW on the<br/>developing candle"]
+    CB -- Yes --> FIRE([Flag fires at close<br/>~1 bar late · stable])
+    CB -- No --> WAIT[Wait for bar to close]
+    RT --> RTF([Flag fires intrabar<br/>LEADS · may REPAINT])
+
+    PRICE[Current close] --> NEAR{"Within<br/>warnAtrMult × ATR<br/>of opposite band?"}
+    NEAR -- "uptrend &amp; near upBand" --> WS([◆ Early SELL warning])
+    NEAR -- "downtrend &amp; near dnBand" --> WL([◆ Early BUY warning])
+    NEAR -- "no" --> NN[No warning]
+
+    classDef ok fill:#0e2430,stroke:#39c5cf,color:#e6edf3;
+    classDef repaint fill:#2a2411,stroke:#d29922,color:#e6edf3;
+    class FIRE ok;
+    class RTF repaint;
+    class WS,WL repaint;
+      </pre>
+    </div>
+    <table>
+      <thead><tr><th>Mode / Signal</th><th>When it appears</th><th>Repaints?</th><th>Use for</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="pill t">Confirmed</span> (default)</td>
+          <td>At bar close, once the flip is locked (<code>barstate.isconfirmed</code>)</td>
+          <td><span class="pill g">No</span></td>
+          <td>Backtest-accurate signals; matches the 89.2% fit</td>
+        </tr>
+        <tr>
+          <td><span class="pill a">Real-time</span></td>
+          <td>Intrabar, on the developing candle the moment state flips</td>
+          <td><span class="pill r">Yes</span></td>
+          <td>Discretionary early heads-up (accept it may vanish)</td>
+        </tr>
+        <tr>
+          <td><span class="pill a">◆ Early-warning</span></td>
+          <td>When price gets within <code>warnAtrMult × ATR</code> of the flip band</td>
+          <td><span class="pill g">No*</span></td>
+          <td>Anticipation — "a flip is getting close"</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="warn">
+      <strong>The honest tradeoff:</strong> you cannot be both <em>earlier</em> and <em>guaranteed correct</em> — that needs future data. <strong>Confirmed</strong> is stable but ~1 bar late. <strong>Real-time</strong> leads but can appear then disappear before the candle closes. <strong>Early-warning</strong> is a proximity alert (not every warning becomes a flip). *The warning bar itself doesn't repaint, but proximity can come and go as price moves.
+    </div>
+    <div class="cards">
+      <div class="card">
+        <h3><span class="dot" style="background:var(--teal)"></span> Reduce raw lag too</h3>
+        <p>Lower <code>Kalman R</code> and/or <code>ATR Period</code> makes the bands react sooner (less smoothing lag) — at the cost of more whipsaw / false flips.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background:var(--amber)"></span> Warning throttle</h3>
+        <p>Only the <em>first</em> bar of a fresh proximity fires a diamond (<code>not warnFlip[1]</code>), so you don't get a solid wall of warnings while price hugs the band.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background:var(--green)"></span> Still session-gated</h3>
+        <p>Both flags and warnings respect the RTH <code>0930–1600</code> filter — nothing fires outside session.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- SIGNALS -->
+  <section>
+    <h2 class="entry">3 · Entry Signals (BUY / SELL)</h2>
+    <p class="lead">Unchanged engine: signals come only from a SuperTrend <strong>trend-state flip</strong>, now passed through the timing gate above. Wave zones never create entries.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    S[Bar close price] --> KF{Use Kalman?}
+    KF -- Yes --> K1["kfEstimate = Kalman-smoothed<br/>(basis)"]
+    KF -- No --> K2["basis = hl2 (A/B)"]
+    K1 --> BND
+    K2 --> BND
+    BND["upBand = basis − 2.0×ATR<br/>dnBand = basis + 2.0×ATR<br/>(ATR period 7)"] --> TS{Trend state}
+    TS -- "close &gt; dnBand[1]" --> UP["trendState = +1"]
+    TS -- "close &lt; upBand[1]" --> DN["trendState = −1"]
+    UP --> FL{Flip vs prior?}
+    DN --> FL
+    FL -- "−1 → +1" --> GATE1{Timing gate<br/>+ in session}
+    FL -- "+1 → −1" --> GATE2{Timing gate<br/>+ in session}
+    FL -- none --> HOLD[No new signal]
+    GATE1 -- pass --> BUY(["BUY ▲ below bar"])
+    GATE2 -- pass --> SELL(["SELL ▼ above bar"])
+
+    classDef buy fill:#132a17,stroke:#2ea043,color:#e6edf3;
+    classDef sell fill:#2a1414,stroke:#f85149,color:#e6edf3;
+    class BUY buy;
+    class SELL sell;
+      </pre>
+    </div>
+  </section>
+
+  <!-- VIRTUAL POSITION (NEW) -->
+  <section>
+    <h2 class="entry">4 · Virtual Position State Machine <span class="pill t">replaces strategy orders</span></h2>
+    <p class="lead">An indicator can't place orders, so <code>posState</code> (1 long / −1 short / 0 flat) is tracked by hand. It drives the entry/stop/target lines, TP markers, and exit alerts exactly like the strategy's real position did.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    ST0["posState = 0 (flat)"] --> SIG{New signal?}
+    SIG -- BUY --> L["posState = +1<br/>store entryPrice, entryAtr,<br/>entryBar · beTriggered=false"]
+    SIG -- SELL --> S["posState = −1<br/>store entry vars · reset BE"]
+    SIG -- none --> HOLD[Hold current state]
+    L --> MGR[Exit manager runs each bar]
+    S --> MGR
+    HOLD --> MGR
+    MGR -- "any exit hits" --> FLAT["posState = 0<br/>reset beTriggered<br/>fire exit alert"]
+    MGR -- "opposite signal" --> REV[Reverse: open other side]
+    FLAT --> ST0
+
+    classDef ex fill:#2a1414,stroke:#f85149,color:#e6edf3;
+    class FLAT ex;
+      </pre>
+    </div>
+  </section>
+
+  <!-- EXITS -->
+  <section>
+    <h2 class="exit">5 · Exit Logic — Four Independent Conditions</h2>
+    <p class="lead">Once <code>posState ≠ 0</code>, whichever fires first flattens the virtual position and sends an exit alert. Same four rules as the strategy.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    P["Virtual position OPEN"] --> C1{Hard STOP hit?}
+    C1 -- Yes --> X1(["Stop-loss<br/>low/high vs entry ∓ 1.5×ATR<br/>(or breakeven)"])
+    C1 -- No --> C2{TARGET hit?}
+    C2 -- Yes --> X2(["Profit target<br/>entry ± 2.0×ATR"])
+    C2 -- No --> C3{Opposite WAVE<br/>zone touched?}
+    C3 -- Yes --> X3(["Zone exit<br/>OB→close long / OS→close short"])
+    C3 -- No --> C4{Held ≥ 12 bars?}
+    C4 -- Yes --> X4(["Time stop"])
+    C4 -- No --> P
+
+    classDef ex fill:#2a1414,stroke:#f85149,color:#e6edf3;
+    class X1,X2,X3,X4 ex;
+      </pre>
+    </div>
+    <table>
+      <thead><tr><th>Exit</th><th>Type</th><th>Trigger</th><th>Alert</th></tr></thead>
+      <tbody>
+        <tr><td>Stop-loss</td><td><span class="pill r">Protective</span></td><td><code>low ≤ entry−1.5×ATR</code> (long) / <code>high ≥ entry+1.5×ATR</code> (short); ATR frozen at entry</td><td>Long/Short exit</td></tr>
+        <tr><td>Profit target</td><td><span class="pill g">Take profit</span></td><td><code>high ≥ entry+2.0×ATR</code> / <code>low ≤ entry−2.0×ATR</code></td><td>Long/Short exit</td></tr>
+        <tr><td>Zone-touch</td><td><span class="pill a">Reference</span></td><td>Long tags upper outer edge (overbought); short tags lower outer edge. Toggle <code>useZoneExit</code></td><td>Long/Short exit</td></tr>
+        <tr><td>Time stop</td><td><span class="pill a">Housekeeping</span></td><td><code>bar_index − entryBar ≥ 12</code>. Toggle <code>useTimeStop</code></td><td>Long/Short exit</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- STOPS / BREAKEVEN -->
+  <section>
+    <h2 class="stop">6 · Stop Management &amp; Breakeven ("Trailing")</h2>
+    <p class="lead">Same as the strategy: <strong>not a continuous trail</strong> — a <strong>one-time breakeven jump</strong>. After a 1×ATR favorable move, the stop snaps to entry and stays.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    E[Virtual trade opens] --> INIT["Stop = entry ∓ 1.5×ATR<br/>beTriggered = false"]
+    INIT --> W{Favorable move<br/>≥ 1.0×ATR?}
+    W -- No --> W
+    W -- "Yes" --> BE["beTriggered = true<br/>Stop JUMPS to entry"]
+    BE --> LOCK["Stop stays at breakeven<br/>(does NOT keep trailing)"]
+    LOCK --> DONE{Stop or target<br/>eventually hit}
+    DONE --> OUT([Flat + exit alert])
+
+    classDef be fill:#2a2411,stroke:#d29922,color:#e6edf3;
+    class BE,LOCK be;
+      </pre>
+    </div>
+    <div class="note">
+      <strong>On chart:</strong> grey = <code>Entry Price</code>, red = live <code>Stop Loss</code> (snaps up to grey on breakeven), green = fixed <code>Take Profit</code>. On-open <span class="pill r">SL</span> / <span class="pill g">TP</span> labels print the initial bracket. Because there's no order engine, these are drawn from the virtual position for visual/alert use only.
+    </div>
+  </section>
+
+  <!-- WAVE ZONES -->
+  <section>
+    <h2 class="zone">7 · ADX Volatility Wave Zones (Exit Reference Only)</h2>
+    <p class="lead">Unchanged from the strategy. Red (upper) / green (lower) gradient ribbons are overbought/oversold zones feeding the zone-touch exit and TP markers — never entries.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    EQ["Equilibrium = VWMA(50)"] --> WID
+    BB["BB stdev × 1.5"] --> WID
+    ADX["ADX (14)"] --> WID
+    WID["width = BBstdev × (1 + 0.8×ADX/100)<br/>RMA-smoothed"] --> OFF
+    OFF["Inner = eq ± 1.0×width<br/>Outer = eq ± 2.0×width"] --> ZONE
+    ZONE{Price vs outer} -- "≥ upper outer" --> OB["OVERBOUGHT → close LONG"]
+    ZONE -- "≤ lower outer" --> OS["OVERSOLD → close SHORT"]
+    ZONE -- between --> NEU["Neutral"]
+    OB --> TP1["TP (long): lower high while OB"]
+    OS --> TP2["TP (short): higher low while OS"]
+
+    classDef z fill:#1e1630,stroke:#a371f7,color:#e6edf3;
+    class OB,OS,NEU z;
+      </pre>
+    </div>
+  </section>
+
+  <!-- QUICK REFERENCE -->
+  <section>
+    <h2>8 · Quick Reference — Chart Marks (Indicator)</h2>
+    <table>
+      <thead><tr><th>On chart</th><th>Meaning</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill g">▲ Green triangle</span></td><td>Confirmed/real-time flip up, in session</td><td>BUY</td></tr>
+        <tr><td><span class="pill r">▼ Red triangle</span></td><td>Flip down, in session</td><td>SELL</td></tr>
+        <tr><td><span class="pill t">◆ Lime diamond (below)</span></td><td>Price nearing a BUY flip</td><td>Early-warning heads-up</td></tr>
+        <tr><td><span class="pill a">◆ Orange diamond (above)</span></td><td>Price nearing a SELL flip</td><td>Early-warning heads-up</td></tr>
+        <tr><td>Green/red band line</td><td>Active SuperTrend side</td><td>Trend context</td></tr>
+        <tr><td>Red / green gradient ribbons</td><td>Overbought / oversold wave zones</td><td>Exit reference</td></tr>
+        <tr><td><span class="pill a">Orange ✕</span></td><td>Exhaustion inside a zone</td><td>Consider taking profit</td></tr>
+        <tr><td>Grey / red / green level lines</td><td>Virtual entry / stop / target</td><td>Trade management + alerts</td></tr>
+        <tr><td>Yellow background</td><td>Volatility compression</td><td>New wave likely soon (info)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <div class="disclaimer">
+    Indicator port of an <strong>original approximation script</strong> (not a copy of any protected indicator), for research/comparison. Only <strong>Confirmed</strong> timing is non-repainting and matches the ~89% entry fit; <strong>Real-time</strong> leads but repaints; <strong>early-warning</strong> is a proximity alert, not a guaranteed flip. Indicators place no orders — the virtual position exists only to draw levels and fire alerts. Not financial advice; past/hypothetical behavior is not indicative of future results.
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    flowchart: { curve: 'basis', htmlLabels: true, useMaxWidth: true },
+    themeVariables: {
+      background: '#161b22',
+      primaryColor: '#1c2330',
+      primaryBorderColor: '#2d3542',
+      primaryTextColor: '#e6edf3',
+      lineColor: '#5a6472',
+      fontSize: '14px'
+    }
+  });
+</script>
+</body>
+</html>

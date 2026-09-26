@@ -1,0 +1,1012 @@
+//@version=6
+// =============================================================================
+//  Chaufer-Engine Pro  —  ORB/ARB · EMA Pullback · VWAP Reversal · Liquidity
+//  Four independent signal engines, each toggled on/off, all sharing ONE
+//  confluence core (VWAP / Volume / RSI / ADX / ATR) so nothing is computed
+//  twice. Stochastic has been intentionally removed.
+//
+//    ① ORB/ARB    : opening- and afternoon-range breakouts (2-candle confirm) +
+//                   rejection REVERSIONS inside the range edges.
+//    ② EMA        : trend pullback into the fast EMA + break-of-structure
+//                   continuation (9/20/50).
+//    ③ VWAP       : touch-and-reverse VWAP signals with same-colour confirmation.
+//    ④ Liquidity  : wick-through-then-close-back stop-run sweeps of key levels
+//                   (PDH/PDL, PDC, PMH/PML, OR, ARB, weekly, equal highs/lows).
+//
+//  Signals confirm on CLOSED bars (non-repainting). Range drawings are
+//  "today only": prior-session objects are deleted at each new session.
+// =============================================================================
+indicator("Chaufer-Engine Pro [ORB/ARB · EMA · VWAP · Liquidity]", shorttitle="Chaufer-Engine", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================ MASTER TOGGLES =================================
+grpMain = "Master Toggles"
+enORB = input.bool(true,  "① ORB/ARB Breakouts + Reversions", group = grpMain)
+enEMA = input.bool(true,  "② EMA Pullback + Continuation",    group = grpMain)
+enVWR = input.bool(true,  "③ VWAP Reversal / Cross",          group = grpMain)
+enSWP = input.bool(false, "④ Liquidity Sweeps (Stop-Runs)",   group = grpMain)
+
+// ============================ SESSION (shared) ==============================
+grpSes = "Session (shared)"
+sess = input.session("0930-1600", "Regular Session", group = grpSes)
+tz   = input.string("America/New_York", "Timezone", group = grpSes)
+
+// ============================ CONFLUENCE (shared) ===========================
+grpConf = "Confluence Core (shared)"
+useVWAPc = input.bool(true,  "Use VWAP Confluence", group = grpConf)
+useVol   = input.bool(true,  "Use Volume Confluence", group = grpConf)
+volLen   = input.int(20, "Volume MA Length", minval = 1, group = grpConf)
+volMult  = input.float(1.5, "Volume Surge Mult (x avg)", minval = 0.1, step = 0.1, group = grpConf)
+useRSI   = input.bool(true,  "Use RSI Confluence", group = grpConf)
+rsiLen   = input.int(7, "RSI Length", minval = 1, group = grpConf)
+rsiOB    = input.int(80, "RSI Overbought", minval = 50, maxval = 100, group = grpConf)
+rsiOS    = input.int(20, "RSI Oversold", minval = 0, maxval = 50, group = grpConf)
+useADX   = input.bool(true,  "Use ADX Confluence", group = grpConf)
+adxLen   = input.int(14, "ADX / DMI Length", minval = 1, group = grpConf)
+adxThr   = input.float(20.0, "ADX Threshold", minval = 0, step = 1, group = grpConf)
+atrLen   = input.int(14, "ATR Length (filters)", minval = 1, group = grpConf)
+showVWAP = input.bool(true,  "Plot VWAP", group = grpConf)
+
+// ============================ ① ORB/ARB INPUTS ==============================
+grpOR = "① Opening Range (ORB)"
+orChoice = input.string("15", "OR Duration (min)", options = ["5", "15", "30"], group = grpOR)
+showORBox= input.bool(true, "Show OR Box", group = grpOR)
+orBoxMins= input.int(120, "OR Box Duration (min)", minval = 5, group = grpOR, tooltip = "How long the OR box extends to the right from the session open. Default 120 = first 2 hours; after that the box stops growing but stays on the chart.")
+orBoxCol = input.color(color.new(color.blue, 92), "OR Box Fill", group = grpOR)
+orHiCol  = input.color(color.green, "OR High Line", group = grpOR)
+orLoCol  = input.color(color.red,   "OR Low Line", group = grpOR)
+
+grpARB = "① Afternoon Range (ARB)"
+useARB   = input.bool(true, "Enable ARB", group = grpARB)
+arbSess  = input.session("1330-1500", "ARB Window", group = grpARB)
+showARBox= input.bool(true, "Show ARB Box", group = grpARB)
+arbBoxCol= input.color(color.new(color.teal, 92), "ARB Box Fill", group = grpARB)
+arbHiCol = input.color(color.teal,   "ARB High Line", group = grpARB)
+arbLoCol = input.color(color.maroon, "ARB Low Line", group = grpARB)
+
+grpS1 = "① Breakout / Reversion"
+confirmBeyond = input.bool(true, "Require 2nd candle to close beyond crossing candle", group = grpS1)
+requireConf   = input.bool(false, "Require full confluence to fire a breakout", group = grpS1)
+suppressC     = input.bool(true, "Suppress grade-C breakouts (no confluence)", group = grpS1)
+revBandPct    = input.float(10.0, "Reversion Band (% of range)", minval = 1.0, maxval = 50.0, step = 1.0, group = grpS1, tooltip = "Rejection zone width around each edge, straddling inside + outside the level.")
+longCol  = input.color(color.green,  "Breakout Long", group = grpS1)
+shortCol = input.color(color.red,    "Breakout Short", group = grpS1)
+goldCol  = input.color(#FFD700,      "Breakout Highlight", group = grpS1)
+revCol   = input.color(color.orange, "Reversion Marker", group = grpS1)
+
+// ============================ ② EMA INPUTS ==================================
+grpS2 = "② EMA Pullback + Continuation"
+emaFastLen  = input.int(9,  "Fast EMA", minval = 1, group = grpS2)
+emaMidLen   = input.int(20, "Mid EMA",  minval = 1, group = grpS2)
+emaSlowLen  = input.int(50, "Slow EMA", minval = 1, group = grpS2)
+contReqStack= input.bool(true, "Require EMA stack (9>20>50)", group = grpS2)
+contReqVwap = input.bool(true, "Require VWAP alignment", group = grpS2)
+contInSess  = input.bool(true, "Only in session", group = grpS2)
+pivLeft     = input.int(5, "Swing Pivot Left", minval = 1, group = grpS2)
+pivRight    = input.int(2, "Swing Pivot Right", minval = 1, group = grpS2)
+contPlotEma = input.bool(true, "Plot EMAs", group = grpS2)
+contPlotBos = input.bool(true, "Plot Break-of-Structure level", group = grpS2)
+contUpCol   = input.color(color.lime,    "Continuation Long", group = grpS2)
+contDnCol   = input.color(color.fuchsia, "Continuation Short", group = grpS2)
+
+// ============================ ③ VWAP INPUTS =================================
+grpS3 = "③ VWAP Reversal / Cross"
+vwrTouchMlt = input.float(0.10, "VWAP Touch Proximity (x ATR)", minval = 0.0, step = 0.01, group = grpS3, tooltip = "How close the candle must come to VWAP to count as a touch, measured by WICK or BODY (whichever is nearer). 0.10 = within 10% of ATR.")
+vwrScope    = input.int(5, "Confirmation Scope (candles)", minval = 1, maxval = 20, group = grpS3)
+vwrMinGap   = input.int(3, "Min Candle Space Between Same-Direction Signals", minval = 0, group = grpS3)
+vwrReqVol   = input.bool(false, "Require Volume Surge on confirm candle", group = grpS3)
+vwrReqRsi   = input.bool(false, "Require RSI alignment on confirm candle", group = grpS3)
+vwrInSess   = input.bool(true, "Only in session", group = grpS3)
+vwrLongCol  = input.color(color.aqua,   "VWAP Buy", group = grpS3)
+vwrShortCol = input.color(color.purple, "VWAP Sell", group = grpS3)
+
+// ============================ ④ LIQUIDITY SWEEP INPUTS =====================
+grpS4 = "④ Liquidity Sweeps (Stop-Runs)"
+sweepInSess = input.bool(true,  "Only in session", group = grpS4)
+sweepPD     = input.bool(true,  "Prev-Day High / Low (PDH/PDL)", group = grpS4)
+sweepPDC    = input.bool(false, "Prev-Day Close (PDC)", group = grpS4)
+sweepPM     = input.bool(true,  "Premarket High / Low (PMH/PML)", group = grpS4)
+pmSess      = input.session("0400-0930", "Premarket Window", group = grpS4, tooltip = "Requires extended-hours data on the chart.")
+sweepORlvl  = input.bool(true,  "OR High / Low", group = grpS4)
+sweepARBlvl = input.bool(true,  "ARB High / Low", group = grpS4)
+sweepWK     = input.bool(false, "Weekly High / Low", group = grpS4)
+sweepEQ     = input.bool(true,  "Equal Highs / Lows (liquidity pools)", group = grpS4)
+eqTolMode   = input.string("ATR", "Equal H/L Tolerance Basis", options = ["ATR", "Percent"], group = grpS4)
+eqTolAtr    = input.float(0.1, "Equal H/L Tol (ATR mult)", minval = 0.0, step = 0.05, group = grpS4)
+eqTolPct    = input.float(0.1, "Equal H/L Tol (%)", minval = 0.0, step = 0.05, group = grpS4)
+swpUpCol    = input.color(color.red,   "Sweep Up (bearish hint)", group = grpS4)
+swpDnCol    = input.color(color.green, "Sweep Down (bullish hint)", group = grpS4)
+
+// ============================ KEY LEVELS (display) =========================
+// Independent of the four engines — works with any toggle combination. Levels
+// are drawn for the CURRENT session only (previous active day on weekends /
+// holidays) with a right-side price label, mirroring ORB Confluence Pro.
+grpKL = "Key Levels (Display)"
+showKL    = input.bool(true,  "Show Key Levels (labelled)", group = grpKL)
+klPD      = input.bool(true,  "Prev-Day High / Low (PDH/PDL)", group = grpKL)
+klPDC     = input.bool(false, "Prev-Day Close (PDC)", group = grpKL)
+klPM      = input.bool(true,  "Premarket High / Low (PMH/PML)", group = grpKL)
+klOpen    = input.bool(true,  "Session Opening Price", group = grpKL)
+klWK      = input.bool(true,  "Weekly High / Low (prev week on Monday)", group = grpKL)
+klORARB   = input.bool(true,  "OR / ARB High / Low (needs ① enabled)", group = grpKL)
+klPDCol   = input.color(color.orange,  "PD Color", group = grpKL)
+klPMCol   = input.color(color.fuchsia, "PM Color", group = grpKL)
+klWKCol   = input.color(color.blue,    "Week Color", group = grpKL)
+klOpenCol = input.color(color.gray,    "Open Color", group = grpKL)
+
+// ============================ SHARED FILTERS ================================
+grpFlt = "Shared Filters"
+useCooldown  = input.bool(true, "Breakout Signal Cooldown", group = grpFlt)
+cooldownBars = input.int(3, "Cooldown bars (ORB/ARB)", minval = 0, group = grpFlt)
+showTable    = input.bool(true, "Show MTF RSI / MACD Table", group = grpFlt)
+
+// ============================ MTF RSI / MACD TABLE =========================
+grpMTF = "MTF RSI / MACD Table"
+tblPos     = input.string("Bottom Right", "Table Location", options = ["Top Right", "Top Center", "Top Left", "Middle Right", "Middle Center", "Middle Left", "Bottom Right", "Bottom Center", "Bottom Left"], group = grpMTF)
+mtfRsiLen  = input.int(9, "MTF RSI Length", minval = 1, group = grpMTF, tooltip = "Faster than the classic 14 for timelier intraday momentum reads.")
+mtfRsiOB   = input.int(70, "MTF RSI Overbought", minval = 50, maxval = 100, group = grpMTF)
+mtfRsiOS   = input.int(30, "MTF RSI Oversold", minval = 0, maxval = 50, group = grpMTF)
+rsiMomBand = input.int(5, "RSI Momentum Band (± from 50)", minval = 0, maxval = 25, group = grpMTF, tooltip = "Bias/quality use 50 ± band as the bull/bear divide (Constance Brown). 5 => bull ≥55, bear ≤45. Rejects the wishy-washy chop right around the 50 line.")
+macdFast   = input.int(8,  "MACD Fast", minval = 1, group = grpMTF, tooltip = "Faster intraday MACD (8/21/5) picks up momentum shifts earlier than 12/26/9.")
+macdSlow   = input.int(21, "MACD Slow", minval = 1, group = grpMTF)
+macdSignal = input.int(5,  "MACD Signal", minval = 1, group = grpMTF)
+macdStrongATR = input.float(0.60, "MACD Strong (|line|/ATR ≥)", minval = 0.0, step = 0.05, group = grpMTF, tooltip = "How far the MACD line must sit from zero, measured in ATR units, to count as STRONG momentum (S).")
+macdMidATR    = input.float(0.25, "MACD Mid (|line|/ATR ≥)",    minval = 0.0, step = 0.05, group = grpMTF, tooltip = "Distance-from-zero (in ATR units) for MID momentum (m); below this is weak (w).")
+trigSel  = input.string("TF 1", "Trigger TF (entry)", options = ["TF 1", "TF 2", "TF 3", "TF 4", "TF 5"], group = grpMTF, tooltip = "Which timeframe row is your ENTRY/trigger. The GO / WAIT / NO decision grades THIS TF's momentum quality against the higher-TF alignment.")
+alignMin = input.int(2, "Min TFs aligned for GO", minval = 1, maxval = 5, group = grpMTF, tooltip = "How many timeframes must agree in the trigger's direction before the decision label reads GO.")
+mtfUse1 = input.bool(true, "TF 1", inline = "tf1", group = grpMTF)
+mtfTf1  = input.timeframe("5",  "", inline = "tf1", group = grpMTF)
+mtfUse2 = input.bool(true, "TF 2", inline = "tf2", group = grpMTF)
+mtfTf2  = input.timeframe("15", "", inline = "tf2", group = grpMTF)
+mtfUse3 = input.bool(true, "TF 3", inline = "tf3", group = grpMTF)
+mtfTf3  = input.timeframe("60", "", inline = "tf3", group = grpMTF)
+mtfUse4 = input.bool(true, "TF 4", inline = "tf4", group = grpMTF)
+mtfTf4  = input.timeframe("240", "", inline = "tf4", group = grpMTF)
+mtfUse5 = input.bool(true, "TF 5", inline = "tf5", group = grpMTF)
+mtfTf5  = input.timeframe("D", "", inline = "tf5", group = grpMTF)
+
+// ============================ DECISION LABEL (on chart) =====================
+grpDec = "Decision Label (on chart)"
+showDecision = input.bool(true, "Show floating decision label", group = grpDec, tooltip = "Big GO / WAIT / NO verdict pinned beside the live candle so it is always in your eye-line at price, instead of buried in the corner table.")
+decOffset    = input.int(3, "Label offset (bars right of price)", minval = 0, group = grpDec)
+decSize      = input.string("Normal", "Label size", options = ["Small", "Normal", "Large", "Huge"], group = grpDec)
+
+// ============================ WEBHOOK ALERTS (JSON) =========================
+// Emits structured JSON via alert() for a local app to consume (e.g. Webull
+// options auto-trader). Turn on, then create ONE alert on this indicator with
+// condition "Any alert() function call" and paste your webhook URL — the JSON
+// message is generated automatically. Bullish signals -> CALL, bearish -> PUT.
+grpAlert = "Webhook Alerts (JSON)"
+enAlerts    = input.bool(false, "Emit JSON webhook alerts (alert() calls)", group = grpAlert, tooltip = "Fires on CONFIRMED (closed) bars only, once per bar close, so it is non-repainting. Create the TradingView alert with 'Any alert() function call'.")
+alertSecret = input.string("CHANGE_ME", "Webhook Shared Secret", group = grpAlert, tooltip = "Must match WEBHOOK_SECRET in the local app's .env so spoofed posts are rejected.")
+
+// RSI momentum-band thresholds derived from the ± band (bull/bear divide).
+rsiBull = 50.0 + rsiMomBand
+rsiBear = 50.0 - rsiMomBand
+
+// ============================ SHARED SERIES (computed ONCE) =================
+t       = time(timeframe.period, sess, tz)
+inSess  = not na(t)
+newSess = inSess and (na(t[1]) or not inSess[1])
+
+// bar where the current session opened; on a weekend/holiday this stays parked
+// on the most recent active day so key levels are drawn for that day.
+var int   sessStartBar = na
+var float sessOpen     = na
+if newSess
+    sessStartBar := bar_index
+    sessOpen := open
+
+vwapVal  = ta.vwap
+atrVal   = ta.atr(atrLen)
+volMA    = ta.sma(volume, volLen)
+volSurge = volume > volMA * volMult
+
+rsiVal    = ta.rsi(close, rsiLen)
+rsiRising = rsiVal > rsiVal[1]
+rsiUpOK   = rsiVal < rsiOB and rsiRising
+rsiDnOK   = rsiVal > rsiOS and not rsiRising
+
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxOK = adxVal >= adxThr
+
+isGreen  = close > open
+isRed    = close < open
+vwapUpOK = close > vwapVal
+vwapDnOK = close < vwapVal
+
+// shared deletable drawing handles / arrays
+var label[] marks     = array.new_label()
+var box[]   markBoxes = array.new_box()
+var label[] revs      = array.new_label()
+var line[]  keyLines  = array.new_line()
+var label[] keyLabels = array.new_label()
+
+// ============================ SHARED HELPERS ================================
+// Confluence grade: base breakout + up to 4 confluence points (VWAP/Vol/RSI/ADX).
+f_grade(bool vwapOK, bool rsiOK) =>
+    pts    = 1 + (useVWAPc and vwapOK ? 1 : 0) + (useVol and volSurge ? 1 : 0) + (useRSI and rsiOK ? 1 : 0) + (useADX and adxOK ? 1 : 0)
+    maxPts = 1 + (useVWAPc ? 1 : 0) + (useVol ? 1 : 0) + (useRSI ? 1 : 0) + (useADX ? 1 : 0)
+    pts == maxPts ? "A" : pts >= maxPts - 1 ? "B" : "C"
+
+f_reason(string g, int dir, bool vwapOK, bool rsiOK, string tag) =>
+    d   = dir == 1 ? "Bullish breakout above " + tag + " High" : "Bearish breakout below " + tag + " Low"
+    v   = not useVWAPc ? "VWAP: n/a" : vwapOK ? "VWAP ✓" : "VWAP ✗"
+    vol = not useVol   ? "Vol: n/a"  : volSurge ? "Vol ✓" : "Vol ✗"
+    r   = not useRSI   ? "RSI: n/a"  : rsiOK ? "RSI ✓" : "RSI ✗"
+    a   = not useADX   ? "ADX: n/a"  : adxOK ? "ADX ✓" : "ADX ✗"
+    m   = g == "A" ? "Grade A — full confluence" : g == "B" ? "Grade B — partial confluence" : "Grade C — breakout only (high fakeout risk)"
+    m + "\n• " + d + "\n• " + v + "   " + vol + "   " + r + "   " + a
+
+// Liquidity-sweep tooltip: which level was run and what the stop-run implies.
+f_sweepReason(bool isUp, string lvlName, float lvlPrice) =>
+    hdr    = isUp ? "BUY-SIDE liquidity SWEPT above " + lvlName : "SELL-SIDE liquidity SWEPT below " + lvlName
+    act    = isUp ? "Stops above the level were run, then price CLOSED back below → failed push up (bearish hint)" : "Stops below the level were run, then price CLOSED back above → failed push down (bullish hint)"
+    lvlTxt = lvlName + " = " + str.tostring(lvlPrice, format.mintick)
+    "⚡ Liquidity Sweep / Stop-Run\n• " + hdr + "\n• " + act + "\n• " + lvlTxt
+
+// VWAP reversal tooltip: the touch-and-reverse setup plus confluence status.
+f_vwrReason(bool isBuy, float ref) =>
+    hdr = isBuy ? "BUY — bounce off VWAP support" : "SELL — reject off VWAP resistance"
+    act = isBuy ? "Price TOUCHED VWAP, REVERSED up, then a later green candle CLOSED above the reversal candle's body (confirmation)" : "Price TOUCHED VWAP, REVERSED down, then a later red candle CLOSED below the reversal candle's body (confirmation)"
+    vol = not vwrReqVol ? "Vol: n/a" : volSurge ? "Vol ✓" : "Vol ✗"
+    r   = not vwrReqRsi ? "RSI: n/a" : (isBuy ? rsiUpOK : rsiDnOK) ? "RSI ✓" : "RSI ✗"
+    vtxt = "VWAP = " + str.tostring(vwapVal, format.mintick)
+    rtxt = na(ref) ? "" : "\n• Reversal ref = " + str.tostring(ref, format.mintick)
+    "③ VWAP Reversal / Cross\n• " + hdr + "\n• " + act + "\n• " + vol + "   " + r + "\n• " + vtxt + rtxt
+
+// Draw a key level as a line spanning ONLY the current session (previous active
+// day on a weekend/holiday) with a right-side price label.
+f_drawKey(bool en, float price, string txt, color col) =>
+    if en and not na(price) and not na(sessStartBar)
+        ln = line.new(sessStartBar, price, bar_index + 3, price, xloc = xloc.bar_index, color = col, width = 1, style = line.style_solid)
+        array.push(keyLines, ln)
+        lb = label.new(bar_index + 3, price, txt + "  " + str.tostring(price, format.mintick), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(col, 85), textcolor = col, size = size.small)
+        array.push(keyLabels, lb)
+
+// Range breakout + reversion engine. One implementation, called for BOTH the OR
+// and the ARB range (per-call-site persistent state) so nothing is duplicated.
+// Returns [confUp, confDn, revUp, revDn, dir].
+f_engine(bool active, float rH, float rL, string tag, bool cdOK) =>
+    var bool  pendUp = false
+    var bool  pendDn = false
+    var float cH     = na
+    var float cL     = na
+    var int   cBar   = na
+    var bool  pRevUp = false
+    var bool  pRevDn = false
+    var float rjH    = na
+    var float rjL    = na
+    var int   rjBar  = na
+    var bool  revUpUsed = false
+    var bool  revDnUsed = false
+    var int   dir    = 0
+
+    cfU = false
+    cfD = false
+    rvU = false
+    rvD = false
+
+    // arm on a fresh cross of the range edge
+    crossUp = active and close > rH and close[1] <= rH
+    crossDn = active and close < rL and close[1] >= rL
+    if crossUp
+        pendUp := true
+        pendDn := false
+        cH := high
+        cBar := bar_index
+    if crossDn
+        pendDn := true
+        pendUp := false
+        cL := low
+        cBar := bar_index
+
+    allowUp = (not requireConf) or ((not useVWAPc or vwapUpOK) and (not useVol or volSurge) and (not useRSI or rsiUpOK) and (not useADX or adxOK))
+    allowDn = (not requireConf) or ((not useVWAPc or vwapDnOK) and (not useVol or volSurge) and (not useRSI or rsiDnOK) and (not useADX or adxOK))
+
+    confUp = active and pendUp and bar_index > cBar and isGreen and (not confirmBeyond or close > cH)
+    confDn = active and pendDn and bar_index > cBar and isRed   and (not confirmBeyond or close < cL)
+    failUp = pendUp and close < rH
+    failDn = pendDn and close > rL
+
+    // ---- bullish confirmation ----
+    if confUp and allowUp and cdOK
+        g = f_grade(vwapUpOK, rsiUpOK)
+        if not (suppressC and g == "C")
+            cfU := true
+            dir := 1
+            lb = label.new(bar_index, low, "▲ " + g, yloc = yloc.belowbar, color = longCol, textcolor = color.white, style = label.style_label_up, size = size.small, tooltip = f_reason(g, 1, vwapUpOK, rsiUpOK, tag))
+            array.push(marks, lb)
+            bx = box.new(bar_index, high, bar_index, low, border_color = goldCol, border_width = 3, bgcolor = color.new(goldCol, 75))
+            array.push(markBoxes, bx)
+        pendUp := false
+        cH := na
+    else if failUp
+        pendUp := false
+        cH := na
+
+    // ---- bearish confirmation ----
+    if confDn and allowDn and cdOK
+        g = f_grade(vwapDnOK, rsiDnOK)
+        if not (suppressC and g == "C")
+            cfD := true
+            dir := -1
+            lb = label.new(bar_index, high, "▼ " + g, yloc = yloc.abovebar, color = shortCol, textcolor = color.white, style = label.style_label_down, size = size.small, tooltip = f_reason(g, -1, vwapDnOK, rsiDnOK, tag))
+            array.push(marks, lb)
+            bx = box.new(bar_index, high, bar_index, low, border_color = goldCol, border_width = 3, bgcolor = color.new(goldCol, 75))
+            array.push(markBoxes, bx)
+        pendDn := false
+        cL := na
+    else if failDn
+        pendDn := false
+        cL := na
+
+    // ---- rejection reversions inside the range (band straddling each edge) ----
+    rng  = active ? rH - rL : na
+    band = na(rng) ? na : rng * revBandPct / 100.0
+    inHiZone = not na(band) and high >= rH - band and high <= rH + band
+    inLoZone = not na(band) and low  <= rL + band and low  >= rL - band
+    trigDn = active and isRed   and inHiZone
+    trigUp = active and isGreen and inLoZone
+    if close > rH
+        revDnUsed := false
+    if close < rL
+        revUpUsed := false
+    if trigDn and not revDnUsed
+        pRevDn := true
+        rjL := low
+        rjBar := bar_index
+    if trigUp and not revUpUsed
+        pRevUp := true
+        rjH := high
+        rjBar := bar_index
+    revDnSig = active and pRevDn and bar_index > rjBar and isRed   and close < rjL and not (cfU or cfD)
+    revUpSig = active and pRevUp and bar_index > rjBar and isGreen and close > rjH and not (cfU or cfD)
+    if revDnSig
+        rvD := true
+        revDnUsed := true
+        dir := -1
+        rl = label.new(bar_index, high, "Rev ↓", yloc = yloc.abovebar, color = revCol, textcolor = color.white, style = label.style_label_down, size = size.tiny)
+        array.push(revs, rl)
+        pRevDn := false
+    if revUpSig
+        rvU := true
+        revUpUsed := true
+        dir := 1
+        rl = label.new(bar_index, low, "Rev ↑", yloc = yloc.belowbar, color = revCol, textcolor = color.white, style = label.style_label_up, size = size.tiny)
+        array.push(revs, rl)
+        pRevUp := false
+
+    [cfU, cfD, rvU, rvD, dir]
+
+// ============================ ① ORB / ARB CORE ==============================
+orMin = int(str.tonumber(orChoice))
+orMs  = orMin * 60 * 1000
+orBoxMs = orBoxMins * 60 * 1000
+
+// -- Opening Range build --
+var float orH        = na
+var float orL        = na
+var int   orStartTime= na
+var bool  orLocked   = false
+var box   orBox      = na
+
+// -- Afternoon Range build --
+tArb   = time(timeframe.period, arbSess, tz)
+inArb  = not na(tArb)
+newArb = inArb and (na(tArb[1]) or not inArb[1])
+var float arbH    = na
+var float arbL    = na
+var bool  arbLocked= false
+var box   arbBox   = na
+
+// new-session housekeeping: reset ranges + delete prior-day objects
+if newSess
+    orH := high
+    orL := low
+    orStartTime := t
+    orLocked := false
+    arbH := na
+    arbL := na
+    arbLocked := false
+    if not na(orBox)
+        box.delete(orBox)
+        orBox := na
+    if not na(arbBox)
+        box.delete(arbBox)
+        arbBox := na
+    if array.size(marks) > 0
+        for i = 0 to array.size(marks) - 1
+            label.delete(array.get(marks, i))
+        array.clear(marks)
+    if array.size(markBoxes) > 0
+        for i = 0 to array.size(markBoxes) - 1
+            box.delete(array.get(markBoxes, i))
+        array.clear(markBoxes)
+    if array.size(revs) > 0
+        for i = 0 to array.size(revs) - 1
+            label.delete(array.get(revs, i))
+        array.clear(revs)
+
+// accumulate the opening range for the first orMin minutes
+if enORB and inSess and not orLocked and not newSess
+    if t < orStartTime + orMs
+        orH := math.max(orH, high)
+        orL := math.min(orL, low)
+    else
+        orLocked := true
+
+// accumulate the afternoon range across its window, lock when it ends
+if enORB and useARB
+    if newArb
+        arbH := high
+        arbL := low
+        arbLocked := false
+    else if inArb
+        arbH := math.max(arbH, high)
+        arbL := math.min(arbL, low)
+    if not inArb and inArb[1]
+        arbLocked := true
+
+// OR / ARB boxes (today-only). The OR box only extends for the first orBoxMins
+// (default 2h) from the session open, then freezes but stays visible.
+orBoxOpen = inSess and not na(orStartTime) and t < orStartTime + orBoxMs
+if enORB and showORBox and newSess
+    orBox := box.new(bar_index, high, bar_index, low, border_color = color.new(orHiCol, 40), bgcolor = orBoxCol)
+if enORB and showORBox and orBoxOpen and not na(orBox)
+    box.set_top(orBox, orH)
+    box.set_bottom(orBox, orL)
+    box.set_right(orBox, bar_index)
+if enORB and useARB and showARBox and newArb
+    arbBox := box.new(bar_index, high, bar_index, low, border_color = color.new(arbHiCol, 40), bgcolor = arbBoxCol)
+if enORB and useARB and showARBox and (inArb or arbLocked) and inSess and not na(arbBox)
+    box.set_top(arbBox, arbH)
+    box.set_bottom(arbBox, arbL)
+    box.set_right(arbBox, bar_index)
+
+// active windows: ORB runs until ARB takes over in the afternoon
+orbActive    = enORB and orLocked and inSess and (not useARB or not arbLocked)
+arbSigActive = enORB and useARB and arbLocked and inSess
+
+// shared breakout cooldown
+var int lastSigBar = na
+cdOK = not useCooldown or na(lastSigBar) or (bar_index - lastSigBar) >= cooldownBars
+
+[cfU,  cfD,  rvU,  rvD,  orDir]  = f_engine(orbActive,    orH,  orL,  "OR",  cdOK)
+[acfU, acfD, arvU, arvD, arbDir] = f_engine(arbSigActive, arbH, arbL, "ARB", cdOK)
+
+if cfU or cfD or acfU or acfD
+    lastSigBar := bar_index
+
+// OR / ARB edge lines are drawn as today-only key-level lines further below, so
+// they persist for the current (or last active) session even outside hours.
+
+// ============================ ② EMA PULLBACK + CONTINUATION =================
+emaFast = ta.ema(close, emaFastLen)
+emaMid  = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+ph = ta.pivothigh(high, pivLeft, pivRight)
+pl = ta.pivotlow(low,  pivLeft, pivRight)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+var bool  armLong  = false
+var bool  armShort = false
+var float bosUp    = na
+var float bosDn    = na
+
+bullTrend = emaFast > emaMid and close > emaSlow and (not contReqStack or (emaFast > emaMid and emaMid > emaSlow))
+bearTrend = emaFast < emaMid and close < emaSlow and (not contReqStack or (emaFast < emaMid and emaMid < emaSlow))
+pullLong  = bullTrend and low  <= emaFast
+pullShort = bearTrend and high >= emaFast
+
+if enEMA and pullLong and not na(lastPH)
+    armLong := true
+    bosUp := lastPH
+if enEMA and pullShort and not na(lastPL)
+    armShort := true
+    bosDn := lastPL
+if not bullTrend
+    armLong := false
+if not bearTrend
+    armShort := false
+
+contSessOK = not contInSess or inSess
+contUpFire = enEMA and armLong  and not na(bosUp) and close > bosUp and (not contReqVwap or vwapUpOK) and contSessOK
+contDnFire = enEMA and armShort and not na(bosDn) and close < bosDn and (not contReqVwap or vwapDnOK) and contSessOK
+if contUpFire
+    armLong := false
+if contDnFire
+    armShort := false
+
+plot(enEMA and contPlotEma ? emaFast : na, "9 EMA",  color = color.new(color.orange, 0), linewidth = 1)
+plot(enEMA and contPlotEma ? emaMid  : na, "20 EMA", color = color.new(color.blue, 0),   linewidth = 1)
+plot(enEMA and contPlotEma ? emaSlow : na, "50 EMA", color = color.new(color.gray, 0),   linewidth = 1)
+plot(enEMA and contPlotBos and armLong  and not na(bosUp) ? bosUp : na, "BOS High", color = color.new(color.lime, 30), style = plot.style_stepline)
+plot(enEMA and contPlotBos and armShort and not na(bosDn) ? bosDn : na, "BOS Low",  color = color.new(color.red, 30),  style = plot.style_stepline)
+
+plotshape(contUpFire, title = "Cont Long",  style = shape.circle, location = location.belowbar, color = contUpCol, size = size.tiny)
+plotshape(contDnFire, title = "Cont Short", style = shape.circle, location = location.abovebar, color = contDnCol, size = size.tiny)
+
+// ============================ ③ VWAP REVERSAL ENGINE ========================
+// Explicit BOUNCE / REJECT machine: TOUCH -> REVERSAL -> CONFIRMATION.
+//   ① TOUCH   : a candle comes within `vwrTouch` of VWAP by WICK *or* BODY.
+//   ② REVERSAL: a candle turns in the bounce direction (green for buy / red for
+//               sell) within the confirmation window; its CLOSE becomes the
+//               reference. The touch candle may itself be the reversal.
+//   ③ CONFIRM : a LATER same-direction candle closes beyond the reversal candle's
+//               CLOSE (body), optionally gated by Vol/RSI -> signal fires.
+// Only a DECISIVE close beyond the touch band (VWAP ∓ vwrTouch) resets the setup,
+// so a shallow pullback candle inside the band no longer wipes it. min-gap +
+// scope timeout + session gate still apply. Stage codes: 0 idle, 1 touched,
+// 2 reversed.
+vwrTouch     = atrVal * vwrTouchMlt
+vwrVolOK     = not vwrReqVol or volSurge
+// touch = wick OR body within band, candle still on the correct side of VWAP
+vwrBuyTouch  = (low  <= vwapVal + vwrTouch or math.min(open, close) <= vwapVal + vwrTouch) and close > vwapVal - vwrTouch
+vwrSellTouch = (high >= vwapVal - vwrTouch or math.max(open, close) >= vwapVal - vwrTouch) and close < vwapVal + vwrTouch
+
+var int   vwrBuyStage  = 0
+var float vwrBuyRef    = na
+var int   vwrBuyBars   = 0
+var int   vwrSellStage = 0
+var float vwrSellRef   = na
+var int   vwrSellBars  = 0
+var int   vwrLastBuy   = na
+var int   vwrLastSell  = na
+
+vwrBuySig  = false
+vwrSellSig = false
+
+if enVWR and not na(vwapVal) and not na(atrVal)
+    // ---- BUY (bounce off VWAP support) ----
+    // decisive close below the touch band invalidates the setup
+    if close < vwapVal - vwrTouch
+        vwrBuyStage := 0
+        vwrBuyRef := na
+        vwrBuyBars := 0
+    // scope timeout
+    if vwrBuyStage >= 1
+        vwrBuyBars += 1
+        if vwrBuyBars > vwrScope
+            vwrBuyStage := 0
+            vwrBuyRef := na
+            vwrBuyBars := 0
+    // ③ confirmation: later green closes above reversal candle's body/close
+    if vwrBuyStage == 2
+        if isGreen and close > vwrBuyRef and vwrVolOK and (not vwrReqRsi or rsiUpOK)
+            vwrBuySig := true
+            vwrBuyStage := 0
+            vwrBuyRef := na
+            vwrBuyBars := 0
+        else if isGreen
+            vwrBuyRef := math.max(vwrBuyRef, close)   // ratchet the reversal reference up only
+            vwrBuyBars := 0
+    // ② reversal: first green after a touch (waiting from stage 1)
+    if vwrBuyStage == 1 and isGreen
+        vwrBuyStage := 2
+        vwrBuyRef := close
+        vwrBuyBars := 0
+    // ① touch: arm the setup; promote to stage 2 same bar if the touch is green
+    if vwrBuyStage == 0 and vwrBuyTouch
+        vwrBuyStage := 1
+        vwrBuyBars := 0
+        if isGreen
+            vwrBuyStage := 2
+            vwrBuyRef := close
+
+    // ---- SELL (reject off VWAP resistance) ----
+    if close > vwapVal + vwrTouch
+        vwrSellStage := 0
+        vwrSellRef := na
+        vwrSellBars := 0
+    if vwrSellStage >= 1
+        vwrSellBars += 1
+        if vwrSellBars > vwrScope
+            vwrSellStage := 0
+            vwrSellRef := na
+            vwrSellBars := 0
+    if vwrSellStage == 2
+        if isRed and close < vwrSellRef and vwrVolOK and (not vwrReqRsi or rsiDnOK)
+            vwrSellSig := true
+            vwrSellStage := 0
+            vwrSellRef := na
+            vwrSellBars := 0
+        else if isRed
+            vwrSellRef := math.min(vwrSellRef, close)   // ratchet the reversal reference down only
+            vwrSellBars := 0
+    if vwrSellStage == 1 and isRed
+        vwrSellStage := 2
+        vwrSellRef := close
+        vwrSellBars := 0
+    if vwrSellStage == 0 and vwrSellTouch
+        vwrSellStage := 1
+        vwrSellBars := 0
+        if isRed
+            vwrSellStage := 2
+            vwrSellRef := close
+
+vwrSessOK  = not vwrInSess or inSess
+vwrBuySig  := vwrBuySig  and vwrSessOK
+vwrSellSig := vwrSellSig and vwrSessOK
+if vwrBuySig and not na(vwrLastBuy) and (bar_index - vwrLastBuy) <= vwrMinGap
+    vwrBuySig := false
+if vwrBuySig
+    vwrLastBuy := bar_index
+if vwrSellSig and not na(vwrLastSell) and (bar_index - vwrLastSell) <= vwrMinGap
+    vwrSellSig := false
+if vwrSellSig
+    vwrLastSell := bar_index
+
+// Rendered as labels (not plotshape) so each signal can carry a hover tooltip.
+if vwrBuySig
+    label.new(bar_index, low,  "V", yloc = yloc.belowbar, color = vwrLongCol,  textcolor = color.white, style = label.style_label_up,   size = size.small, tooltip = f_vwrReason(true,  vwrBuyRef[1]))
+if vwrSellSig
+    label.new(bar_index, high, "V", yloc = yloc.abovebar, color = vwrShortCol, textcolor = color.white, style = label.style_label_down, size = size.small, tooltip = f_vwrReason(false, vwrSellRef[1]))
+
+// ============================ ④ LIQUIDITY SWEEPS (STOP-RUNS) ===============
+// A wick pierces a key level then the bar CLOSES back inside = a stop-run: the
+// body stays on the original side while only the wick pokes through. Buy-side
+// sweep (above a level) is a bearish hint; sell-side sweep (below) is bullish.
+// Reuses the EMA-section pivots (ph/pl) for equal highs/lows and the OR/ARB
+// levels already computed — nothing is recomputed.
+[pdh, pdl, pdc] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+
+tPm   = time(timeframe.period, pmSess, tz)
+inPm  = not na(tPm)
+newPm = inPm and (na(tPm[1]) or not inPm[1])
+var float pmh = na
+var float pml = na
+if newPm
+    pmh := high
+    pml := low
+else if inPm
+    pmh := math.max(pmh, high)
+    pml := math.min(pml, low)
+
+isMonday = dayofweek(time, tz) == dayofweek.monday
+[curWkH, curWkL]   = request.security(syminfo.tickerid, "W", [high, low])
+[prevWkH, prevWkL] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+wkH = isMonday ? prevWkH : curWkH
+wkL = isMonday ? prevWkL : curWkL
+
+// equal highs / lows from the shared pivots (ph/pl): two consecutive pivots
+// within tolerance mark a resting-liquidity pool, held until price closes through.
+eqTol = eqTolMode == "ATR" ? atrVal * eqTolAtr : close * eqTolPct / 100.0
+var float eqLastPH = na
+var float eqPrevPH = na
+var float eqLastPL = na
+var float eqPrevPL = na
+var float eqh = na
+var float eql = na
+if not na(ph)
+    eqPrevPH := eqLastPH
+    eqLastPH := ph
+    if not na(eqPrevPH) and not na(eqTol) and math.abs(eqLastPH - eqPrevPH) <= eqTol
+        eqh := math.max(eqLastPH, eqPrevPH)
+if not na(pl)
+    eqPrevPL := eqLastPL
+    eqLastPL := pl
+    if not na(eqPrevPL) and not na(eqTol) and math.abs(eqLastPL - eqPrevPL) <= eqTol
+        eql := math.min(eqLastPL, eqPrevPL)
+if not na(eqh) and close > eqh
+    eqh := na
+if not na(eql) and close < eql
+    eql := na
+
+// true sweep = only the wick pierces; the body (open->close) stays back inside.
+sweepGate = enSWP and (not sweepInSess or inSess)
+bodyTop = math.max(open, close)
+bodyBot = math.min(open, close)
+swPDH = sweepGate and sweepPD    and not na(pdh)     and high > pdh     and bodyTop < pdh
+swPMH = sweepGate and sweepPM    and not na(pmh)     and high > pmh     and bodyTop < pmh
+swORH = sweepGate and sweepORlvl and orLocked        and not na(orH)   and high > orH   and bodyTop < orH
+swARH = sweepGate and sweepARBlvl and useARB and arbLocked and not na(arbH) and high > arbH and bodyTop < arbH
+swWKH = sweepGate and sweepWK    and not na(wkH)     and high > wkH     and bodyTop < wkH
+swEQH = sweepGate and sweepEQ    and not na(eqh)     and high > eqh     and bodyTop < eqh
+swPDCH= sweepGate and sweepPDC   and not na(pdc)     and high > pdc     and bodyTop < pdc
+swPDL = sweepGate and sweepPD    and not na(pdl)     and low  < pdl     and bodyBot > pdl
+swPML = sweepGate and sweepPM    and not na(pml)     and low  < pml     and bodyBot > pml
+swORL = sweepGate and sweepORlvl and orLocked        and not na(orL)   and low  < orL   and bodyBot > orL
+swARL = sweepGate and sweepARBlvl and useARB and arbLocked and not na(arbL) and low  < arbL and bodyBot > arbL
+swWKL = sweepGate and sweepWK    and not na(wkL)     and low  < wkL     and bodyBot > wkL
+swEQL = sweepGate and sweepEQ    and not na(eql)     and low  < eql     and bodyBot > eql
+swPDCL= sweepGate and sweepPDC   and not na(pdc)     and low  < pdc     and bodyBot > pdc
+
+sweepUp = swPDH or swPMH or swORH or swARH or swWKH or swEQH or swPDCH   // buy-side liquidity above swept (bearish hint)
+sweepDn = swPDL or swPML or swORL or swARL or swWKL or swEQL or swPDCL   // sell-side liquidity below swept (bullish hint)
+
+// which specific level produced the sweep (for the single label + tooltip)
+sweepUpTag = swEQH ? "EQH" : swPDH ? "PDH" : swPMH ? "PMH" : swORH ? "ORH" : swARH ? "ARH" : swWKH ? (isMonday ? "PWH" : "WH") : swPDCH ? "PDC" : ""
+sweepDnTag = swEQL ? "EQL" : swPDL ? "PDL" : swPML ? "PML" : swORL ? "ORL" : swARL ? "ARL" : swWKL ? (isMonday ? "PWL" : "WL") : swPDCL ? "PDC" : ""
+sweepUpLvl = swEQH ? eqh : swPDH ? pdh : swPMH ? pmh : swORH ? orH : swARH ? arbH : swWKH ? wkH : swPDCH ? pdc : na
+sweepDnLvl = swEQL ? eql : swPDL ? pdl : swPML ? pml : swORL ? orL : swARL ? arbL : swWKL ? wkL : swPDCL ? pdc : na
+
+if sweepUp
+    label.new(bar_index, high, "⚡" + sweepUpTag, yloc = yloc.abovebar, color = swpUpCol, textcolor = color.black, style = label.style_label_down, size = size.tiny, tooltip = f_sweepReason(true, sweepUpTag, sweepUpLvl))
+if sweepDn
+    label.new(bar_index, low, "⚡" + sweepDnTag, yloc = yloc.belowbar, color = swpDnCol, textcolor = color.black, style = label.style_label_up, size = size.tiny, tooltip = f_sweepReason(false, sweepDnTag, sweepDnLvl))
+
+// key levels: redraw for the CURRENT session only (previous active day on
+// weekends/holidays) as extendable lines with right-side price labels. Runs
+// independently of the engines so it works with any of the 4 toggles.
+if showKL and barstate.islast
+    if array.size(keyLines) > 0
+        for i = 0 to array.size(keyLines) - 1
+            line.delete(array.get(keyLines, i))
+        array.clear(keyLines)
+    if array.size(keyLabels) > 0
+        for i = 0 to array.size(keyLabels) - 1
+            label.delete(array.get(keyLabels, i))
+        array.clear(keyLabels)
+    f_drawKey(klPD,   pdh, "PDH", klPDCol)
+    f_drawKey(klPD,   pdl, "PDL", klPDCol)
+    f_drawKey(klPDC,  pdc, "PDC", klPDCol)
+    f_drawKey(klPM,   pmh, "PMH", klPMCol)
+    f_drawKey(klPM,   pml, "PML", klPMCol)
+    f_drawKey(klOpen, sessOpen, "OPEN", klOpenCol)
+    f_drawKey(klWK,   wkH, isMonday ? "PWH" : "WH", klWKCol)
+    f_drawKey(klWK,   wkL, isMonday ? "PWL" : "WL", klWKCol)
+    // OR/ARB levels as today-only lines so they persist for the current (or last
+    // active) session even after hours, on weekends and holidays.
+    f_drawKey(klORARB and enORB and orLocked, orH, "ORH", orHiCol)
+    f_drawKey(klORARB and enORB and orLocked, orL, "ORL", orLoCol)
+    f_drawKey(klORARB and enORB and useARB and arbLocked, arbH, "ARH", arbHiCol)
+    f_drawKey(klORARB and enORB and useARB and arbLocked, arbL, "ARL", arbLoCol)
+
+// ============================ VWAP PLOT =====================================
+plot(showVWAP and inSess ? vwapVal : na, "VWAP", color = color.new(color.aqua, 0), linewidth = 1)
+
+// ============================ ALERTS ========================================
+alertcondition(cfU,  "① ORB Breakout Up",   "ORB bullish breakout confirmed on {{ticker}}")
+alertcondition(cfD,  "① ORB Breakout Down", "ORB bearish breakout confirmed on {{ticker}}")
+alertcondition(rvU,  "① ORB Reversion Up",  "ORB rejection reversion up on {{ticker}}")
+alertcondition(rvD,  "① ORB Reversion Down","ORB rejection reversion down on {{ticker}}")
+alertcondition(acfU, "① ARB Breakout Up",   "ARB bullish breakout confirmed on {{ticker}}")
+alertcondition(acfD, "① ARB Breakout Down", "ARB bearish breakout confirmed on {{ticker}}")
+alertcondition(arvU, "① ARB Reversion Up",  "ARB rejection reversion up on {{ticker}}")
+alertcondition(arvD, "① ARB Reversion Down","ARB rejection reversion down on {{ticker}}")
+alertcondition(contUpFire, "② EMA Continuation Long",  "Bullish EMA pullback continuation on {{ticker}}")
+alertcondition(contDnFire, "② EMA Continuation Short", "Bearish EMA pullback continuation on {{ticker}}")
+alertcondition(vwrBuySig,  "③ VWAP Reversal Buy",  "VWAP touch-and-reverse BUY on {{ticker}}")
+alertcondition(vwrSellSig, "③ VWAP Reversal Sell", "VWAP touch-and-reverse SELL on {{ticker}}")
+alertcondition(sweepUp, "④ Liquidity Sweep (buy-side above)", "Buy-side liquidity swept above a key level (bearish hint) on {{ticker}}")
+alertcondition(sweepDn, "④ Liquidity Sweep (sell-side below)", "Sell-side liquidity swept below a key level (bullish hint) on {{ticker}}")
+
+// ============================ JSON WEBHOOK EMITTER =========================
+// Builds a single-line JSON payload for the local auto-trader. Fires only on
+// CLOSED bars (barstate.isconfirmed + freq_once_per_bar_close) => non-repainting.
+f_alertJson(string sig, string act, float px) =>
+    '{"secret":"' + alertSecret + '","ticker":"' + syminfo.ticker + '","action":"' + act + '","signal":"' + sig + '","price":' + str.tostring(px, format.mintick) + ',"atr":' + str.tostring(atrVal, format.mintick) + ',"tf":"' + timeframe.period + '","time":' + str.tostring(time) + '}'
+
+if enAlerts and barstate.isconfirmed
+    if cfU or acfU
+        alert(f_alertJson(cfU ? "ORB_BREAKOUT_UP" : "ARB_BREAKOUT_UP", "CALL", close), alert.freq_once_per_bar_close)
+    if cfD or acfD
+        alert(f_alertJson(cfD ? "ORB_BREAKOUT_DOWN" : "ARB_BREAKOUT_DOWN", "PUT", close), alert.freq_once_per_bar_close)
+    if rvU or arvU
+        alert(f_alertJson("RANGE_REVERSION_UP", "CALL", close), alert.freq_once_per_bar_close)
+    if rvD or arvD
+        alert(f_alertJson("RANGE_REVERSION_DOWN", "PUT", close), alert.freq_once_per_bar_close)
+    if contUpFire
+        alert(f_alertJson("EMA_CONT_LONG", "CALL", close), alert.freq_once_per_bar_close)
+    if contDnFire
+        alert(f_alertJson("EMA_CONT_SHORT", "PUT", close), alert.freq_once_per_bar_close)
+    if vwrBuySig
+        alert(f_alertJson("VWAP_BUY", "CALL", close), alert.freq_once_per_bar_close)
+    if vwrSellSig
+        alert(f_alertJson("VWAP_SELL", "PUT", close), alert.freq_once_per_bar_close)
+    if sweepDn
+        alert(f_alertJson("LIQ_SWEEP_BULL", "CALL", close), alert.freq_once_per_bar_close)
+    if sweepUp
+        alert(f_alertJson("LIQ_SWEEP_BEAR", "PUT", close), alert.freq_once_per_bar_close)
+
+// ============================ MTF RSI / MACD STATUS =========================
+// Per-timeframe RSI + MACD state, pulled with request.security on confirmed
+// bars (lookahead off, non-repainting). For MACD what matters is not just the
+// line-vs-signal cross but WHERE it happens: a cross ABOVE the zero line is a
+// trend-continuation event, a cross BELOW it is an early reversal. We therefore
+// return the MACD line (its sign = regime vs zero), the histogram diff and its
+// slope (expanding/contracting), plus the fresh cross flags. We also return the
+// MACD line's distance from zero normalised by ATR (|line|/ATR) = momentum
+// STRENGTH: far from zero on that timeframe's own volatility scale = a strong,
+// mature move; near zero = weak / transitioning.
+f_mtf() =>
+    r = ta.rsi(close, mtfRsiLen)
+    [m, s, _h] = ta.macd(close, macdFast, macdSlow, macdSignal)
+    diff   = m - s
+    cu     = ta.crossover(m, s)
+    cd     = ta.crossunder(m, s)
+    rising = diff > diff[1]
+    a      = ta.atr(atrLen)
+    dist   = na(a) or a == 0 ? na : math.abs(m) / a
+    // histogram EXPANDING in its own direction: above zero and growing, or below
+    // zero and shrinking. This is momentum ACCELERATING, not just "rising".
+    expand = diff > 0 ? diff > diff[1] : diff < 0 ? diff < diff[1] : false
+    [r, m, diff, cu, cd, rising, dist, expand]
+
+[r1, m1, d1, cu1, cd1, hr1, x1, e1] = request.security(syminfo.tickerid, mtfTf1, f_mtf(), lookahead = barmerge.lookahead_off)
+[r2, m2, d2, cu2, cd2, hr2, x2, e2] = request.security(syminfo.tickerid, mtfTf2, f_mtf(), lookahead = barmerge.lookahead_off)
+[r3, m3, d3, cu3, cd3, hr3, x3, e3] = request.security(syminfo.tickerid, mtfTf3, f_mtf(), lookahead = barmerge.lookahead_off)
+[r4, m4, d4, cu4, cd4, hr4, x4, e4] = request.security(syminfo.tickerid, mtfTf4, f_mtf(), lookahead = barmerge.lookahead_off)
+[r5, m5, d5, cu5, cd5, hr5, x5, e5] = request.security(syminfo.tickerid, mtfTf5, f_mtf(), lookahead = barmerge.lookahead_off)
+
+// ============================ STATUS TABLE ==================================
+var table dash = na
+f_cell(int col, int row, string txt, color bg, color txtCol) => table.cell(dash, col, row, txt, text_color = txtCol, bgcolor = bg, text_size = size.small)
+
+// RSI cell: value + tint (OB red / OS green / bull-bear by 50 midline)
+f_rsiRow(int row, string tfName, bool use, float rv) =>
+    if use and not na(rv)
+        rsiBg  = rv >= mtfRsiOB ? color.new(color.red, 0) : rv <= mtfRsiOS ? color.new(color.green, 0) : rv >= 50 ? color.new(color.green, 55) : color.new(color.red, 55)
+        tag    = rv >= mtfRsiOB ? " OB" : rv <= mtfRsiOS ? " OS" : ""
+        f_cell(0, row, tfName, color.new(color.gray, 60), color.white)
+        f_cell(1, row, str.tostring(rv, "#.0") + tag, rsiBg, color.white)
+
+// MACD cell: encodes three facts at once ->
+//   arrow  : MACD above (▲) or below (▼) its signal line (histogram sign)
+//   zone   : MACD line vs ZERO -> ">0" bullish regime, "<0" bearish regime
+//   cross  : ⤳↑ / ⤳↓ = fresh line/signal cross THIS bar (the key event)
+//   momo   : + / - = histogram expanding / contracting
+//   stg    : S / m / w = momentum STRENGTH = |MACD line|/ATR vs thresholds
+//            (far from zero = strong/mature; near zero = weak/transitioning)
+// Colour = conviction: a cross/state that AGREES with the zero-line side is a
+// continuation (bright); one that FIGHTS it is an early reversal (dim).
+f_macdCell(int row, bool use, float m, float diff, bool cu, bool cd, bool rising, float dist) =>
+    if use and not na(diff) and not na(m)
+        bull   = diff > 0            // MACD above signal
+        above  = m > 0               // above the zero line (regime)
+        strong = (bull and above) or (not bull and not above)
+        arrow  = bull ? "▲" : "▼"
+        zone   = above ? ">0" : "<0"
+        cross  = cu ? " ⤳↑" : cd ? " ⤳↓" : ""
+        momo   = rising ? " +" : " -"
+        stg    = na(dist) ? "" : dist >= macdStrongATR ? " S" : dist >= macdMidATR ? " m" : " w"
+        macdBg = bull and strong  ? color.new(color.green, 0) : bull ? color.new(color.green, 55) : (not bull) and strong ? color.new(color.red, 0) : color.new(color.red, 55)
+        f_cell(2, row, arrow + zone + cross + momo + stg, macdBg, color.white)
+
+// Combined bias with QUALITY grading. Direction uses the momentum band
+// (50 ± rsiMomBand) so chop around 50 is ignored. A bias is QUALITY-confirmed
+// (bright, UPPERCASE) only when it is a continuation (MACD on the trend side of
+// zero) AND strong (|MACD|/ATR ≥ mid) AND the histogram is EXPANDING in-direction.
+// Present-but-unconfirmed reads dim + lowercase with a "?" (weak / fading = fakeout
+// risk); disagreement reads gray MIX.
+f_biasCell(int row, bool use, float rv, float m, float diff, bool expand, float dist) =>
+    if use and not na(rv) and not na(diff) and not na(m)
+        bull   = rv >= rsiBull and diff > 0
+        bear   = rv <= rsiBear and diff < 0
+        cont   = (bull and m > 0) or (bear and m < 0)
+        strong = not na(dist) and dist >= macdMidATR
+        qual   = (bull or bear) and cont and strong and expand
+        txt    = bull ? (qual ? "BULL" : "bull?") : bear ? (qual ? "BEAR" : "bear?") : "MIX"
+        bg     = bull and qual ? color.new(color.green, 0) : bull ? color.new(color.green, 60) : bear and qual ? color.new(color.red, 0) : bear ? color.new(color.red, 60) : color.new(color.gray, 40)
+        f_cell(3, row, txt, bg, color.white)
+
+// Per-TF bias score for the ALIGN tally: +1 bull, -1 bear, 0 mix/unused.
+f_bscore(bool use, float rv, float diff) =>
+    use and not na(rv) and not na(diff) ? (rv >= rsiBull and diff > 0 ? 1 : rv <= rsiBear and diff < 0 ? -1 : 0) : 0
+
+// Per-TF momentum-QUALITY score (anti-fakeout): +1 quality-bull, -1 quality-bear,
+// 0 otherwise. Quality = bias in the momentum band AND continuation (cross on the
+// trend side of zero) AND strength ≥ mid (|MACD|/ATR) AND histogram EXPANDING in
+// the trade direction. A breakout lacking these is the classic instant-reversal trap.
+f_qscore(bool use, float rv, float m, float diff, bool expand, float dist) =>
+    if use and not na(rv) and not na(diff) and not na(m) and not na(dist)
+        bull   = rv >= rsiBull and diff > 0
+        bear   = rv <= rsiBear and diff < 0
+        cont   = (bull and m > 0) or (bear and m < 0)
+        strong = dist >= macdMidATR
+        q      = (bull or bear) and cont and strong and expand
+        bull and q ? 1 : bear and q ? -1 : 0
+    else
+        0
+
+// Momentum strength letter from |MACD|/ATR distance.
+f_stg(float dist) =>
+    na(dist) ? "-" : dist >= macdStrongATR ? "S" : dist >= macdMidATR ? "m" : "w"
+
+// Plain-English reasoning for the floating decision label's tooltip. Explains
+// WHAT the verdict is, WHY, the trigger timeframe's momentum quality, its
+// strength, and how many timeframes agree — so "GO ▼" is fully self-documenting.
+f_decReason(string v3, int tdir, int tq, int ts, float tdist, string tname, int nb, int nbr, int amin) =>
+    dirTxt = tdir == 1 ? "LONG (calls)" : tdir == -1 ? "SHORT (puts)" : "no clear direction"
+    stg    = f_stg(tdist)
+    stgTxt = stg == "S" ? "STRONG" : stg == "m" ? "moderate" : stg == "w" ? "weak" : "n/a"
+    hdr    = v3 == "GO" ? "✅ GO — conditions line up, take the trade" : v3 == "WAIT" ? "⏳ WAIT — right direction, momentum not confirmed yet" : "⛔ NO — no clean setup, stay out"
+    trigTxt = tq != 0 ? "QUALITY-confirmed " + (tq == 1 ? "up" : "down") + " (continuation + strong + expanding)" : ts != 0 ? "present but " + stgTxt + " / not expanding (fakeout risk)" : "none"
+    l1 = "• Direction: " + dirTxt
+    l2 = "• Trigger TF: " + tname + " (your entry timeframe)"
+    l3 = "• Trigger momentum: " + trigTxt
+    l4 = "• Strength (|MACD|/ATR): " + stgTxt
+    l5 = "• Timeframes aligned: " + str.tostring(nb) + " up / " + str.tostring(nbr) + " down  (need " + str.tostring(amin) + " in-direction for GO)"
+    reason = v3 == "GO" ? "Entry-TF momentum is accelerating in-direction and enough higher timeframes agree → take " + dirTxt + "." : v3 == "WAIT" ? "Higher timeframes lean " + (tdir == 1 ? "up" : tdir == -1 ? "down" : "one way") + ", but the entry TF momentum is weak or contracting. Wait for it to EXPAND before entering — this is exactly where breakouts fake out." : "Timeframes disagree or the trigger has no momentum. Skipping avoids chop and instant reversals."
+    hdr + "\n———\n" + l1 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n———\n" + reason
+
+// ---- MTF scoring shared by the corner table AND the floating decision label ----
+s1 = f_bscore(mtfUse1, r1, d1)
+s2 = f_bscore(mtfUse2, r2, d2)
+s3 = f_bscore(mtfUse3, r3, d3)
+s4 = f_bscore(mtfUse4, r4, d4)
+s5 = f_bscore(mtfUse5, r5, d5)
+nBull = (s1 == 1 ? 1 : 0) + (s2 == 1 ? 1 : 0) + (s3 == 1 ? 1 : 0) + (s4 == 1 ? 1 : 0) + (s5 == 1 ? 1 : 0)
+nBear = (s1 == -1 ? 1 : 0) + (s2 == -1 ? 1 : 0) + (s3 == -1 ? 1 : 0) + (s4 == -1 ? 1 : 0) + (s5 == -1 ? 1 : 0)
+alignDir     = nBull > nBear ? 1 : nBear > nBull ? -1 : 0
+alignVerdict = alignDir == 1 ? "BULL" : alignDir == -1 ? "BEAR" : "MIX"
+
+// per-TF momentum-quality scores (anti-fakeout)
+q1 = f_qscore(mtfUse1, r1, m1, d1, e1, x1)
+q2 = f_qscore(mtfUse2, r2, m2, d2, e2, x2)
+q3 = f_qscore(mtfUse3, r3, m3, d3, e3, x3)
+q4 = f_qscore(mtfUse4, r4, m4, d4, e4, x4)
+q5 = f_qscore(mtfUse5, r5, m5, d5, e5, x5)
+
+// trigger-TF (entry) selection
+trigQ    = trigSel == "TF 1" ? q1 : trigSel == "TF 2" ? q2 : trigSel == "TF 3" ? q3 : trigSel == "TF 4" ? q4 : q5
+trigS    = trigSel == "TF 1" ? s1 : trigSel == "TF 2" ? s2 : trigSel == "TF 3" ? s3 : trigSel == "TF 4" ? s4 : s5
+trigDist = trigSel == "TF 1" ? x1 : trigSel == "TF 2" ? x2 : trigSel == "TF 3" ? x3 : trigSel == "TF 4" ? x4 : x5
+trigName = trigSel == "TF 1" ? mtfTf1 : trigSel == "TF 2" ? mtfTf2 : trigSel == "TF 3" ? mtfTf3 : trigSel == "TF 4" ? mtfTf4 : mtfTf5
+
+// GO / WAIT / NO — the decision. GO = trigger momentum is QUALITY-confirmed AND
+// the higher-TF alignment agrees with ≥ alignMin timeframes. WAIT = the aligned
+// direction is there but the trigger is not yet quality (weak / contracting →
+// wait for expansion, don't chase the breakout). NO = no alignment or a conflict.
+tDir       = trigQ != 0 ? trigQ : trigS
+alignInDir = tDir == 1 ? nBull : tDir == -1 ? nBear : 0
+isGo       = trigQ != 0 and alignDir == trigQ and alignInDir >= alignMin
+isWait     = not isGo and trigS != 0 and alignDir == trigS
+verdict3   = isGo ? "GO" : isWait ? "WAIT" : "NO"
+
+// ---- floating decision label pinned beside the live candle (follows price) ----
+// Only shown DURING the selected session (NY 0930-1600 by default); outside
+// session hours the label is removed so it never lingers on a dead chart.
+decSizeVal = decSize == "Small" ? size.small : decSize == "Normal" ? size.normal : decSize == "Huge" ? size.huge : size.large
+var label decLabel = na
+if showDecision and barstate.islast and inSess
+    if not na(decLabel)
+        label.delete(decLabel)
+    arrowTxt = tDir == 1 ? "▲" : tDir == -1 ? "▼" : "•"
+    decTxt   = verdict3 + " " + arrowTxt
+    decCol   = verdict3 == "GO" ? (tDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)) : verdict3 == "WAIT" ? color.new(color.orange, 0) : color.new(color.gray, 20)
+    decTip   = f_decReason(verdict3, tDir, trigQ, trigS, trigDist, trigName, nBull, nBear, alignMin)
+    decLabel := label.new(bar_index + decOffset, close, decTxt, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = decCol, textcolor = color.white, size = decSizeVal, tooltip = decTip)
+else if barstate.islast and not na(decLabel)
+    // outside the session: clear the stale verdict so it doesn't mislead
+    label.delete(decLabel)
+    decLabel := na
+
+if showTable and barstate.islast
+    if not na(dash)
+        table.delete(dash)
+    tblPosVal = tblPos == "Top Right" ? position.top_right : tblPos == "Top Center" ? position.top_center : tblPos == "Top Left" ? position.top_left : tblPos == "Middle Right" ? position.middle_right : tblPos == "Middle Center" ? position.middle_center : tblPos == "Middle Left" ? position.middle_left : tblPos == "Bottom Center" ? position.bottom_center : tblPos == "Bottom Left" ? position.bottom_left : position.bottom_right
+    dash := table.new(tblPosVal, 4, 7, border_width = 1, frame_color = color.gray, frame_width = 1)
+    // header
+    f_cell(0, 0, "TF",   color.new(color.blue, 0), color.white)
+    f_cell(1, 0, "RSI",  color.new(color.blue, 0), color.white)
+    f_cell(2, 0, "MACD", color.new(color.blue, 0), color.white)
+    f_cell(3, 0, "Bias", color.new(color.blue, 0), color.white)
+    // rows
+    f_rsiRow(1, mtfTf1, mtfUse1, r1)
+    f_macdCell(1, mtfUse1, m1, d1, cu1, cd1, hr1, x1)
+    f_biasCell(1, mtfUse1, r1, m1, d1, e1, x1)
+    f_rsiRow(2, mtfTf2, mtfUse2, r2)
+    f_macdCell(2, mtfUse2, m2, d2, cu2, cd2, hr2, x2)
+    f_biasCell(2, mtfUse2, r2, m2, d2, e2, x2)
+    f_rsiRow(3, mtfTf3, mtfUse3, r3)
+    f_macdCell(3, mtfUse3, m3, d3, cu3, cd3, hr3, x3)
+    f_biasCell(3, mtfUse3, r3, m3, d3, e3, x3)
+    f_rsiRow(4, mtfTf4, mtfUse4, r4)
+    f_macdCell(4, mtfUse4, m4, d4, cu4, cd4, hr4, x4)
+    f_biasCell(4, mtfUse4, r4, m4, d4, e4, x4)
+    f_rsiRow(5, mtfTf5, mtfUse5, r5)
+    f_macdCell(5, mtfUse5, m5, d5, cu5, cd5, hr5, x5)
+    f_biasCell(5, mtfUse5, r5, m5, d5, e5, x5)
+    // ALIGN summary (uses the shared scoring computed above)
+    vbg = alignDir == 1 ? color.new(color.green, 0) : alignDir == -1 ? color.new(color.red, 0) : color.new(color.gray, 40)
+    f_cell(0, 6, "ALIGN", color.new(color.blue, 0), color.white)
+    f_cell(1, 6, str.tostring(nBull) + "▲", color.new(color.green, 55), color.white)
+    f_cell(2, 6, str.tostring(nBear) + "▼", color.new(color.red, 55), color.white)
+    f_cell(3, 6, alignVerdict, vbg, color.white)

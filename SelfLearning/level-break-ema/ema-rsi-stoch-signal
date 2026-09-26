@@ -1,0 +1,284 @@
+//@version=6
+indicator("EMA + RSI + Stochastic Signal", overlay=true, max_labels_count=500)
+
+// ─────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────
+
+// EMA Inputs
+ema1_len   = input.int(25,  "EMA 1 Length",  group="EMA Settings")
+ema2_len   = input.int(75,  "EMA 2 Length",  group="EMA Settings")
+ema3_len   = input.int(145, "EMA 3 Length",  group="EMA Settings")
+ema_h_len  = input.int(20,  "EMA High Length", group="EMA Settings")
+ema_l_len  = input.int(20,  "EMA Low Length",  group="EMA Settings")
+
+ema1_col   = input.color(color.new(#00BCD4, 0),  "EMA 1 Color",    group="EMA Settings")
+ema2_col   = input.color(color.new(#FF9800, 0),  "EMA 2 Color",    group="EMA Settings")
+ema3_col   = input.color(color.new(#E91E63, 0),  "EMA 3 Color",    group="EMA Settings")
+ema_h_col  = input.color(color.new(#4CAF50, 60), "EMA High Color", group="EMA Settings")
+ema_l_col  = input.color(color.new(#F44336, 60), "EMA Low Color",  group="EMA Settings")
+
+// RSI Inputs
+rsi_len    = input.int(14, "RSI Length", group="RSI Settings")
+rsi_src    = input.source(close, "RSI Source", group="RSI Settings")
+
+// Stochastic Inputs
+stoch_k    = input.int(14, "%K Length",     group="Stochastic Settings")
+stoch_d    = input.int(3,  "%D Smoothing",  group="Stochastic Settings")
+stoch_smo  = input.int(3,  "%K Smoothing",  group="Stochastic Settings")
+stoch_ob   = input.int(80, "Overbought",    group="Stochastic Settings")
+stoch_os   = input.int(20, "Oversold",      group="Stochastic Settings")
+
+// Heikenashi Toggle
+use_ha     = input.bool(true, "Use Heikenashi Candles", group="Candle Settings")
+show_ha    = input.bool(true, "Show Heikenashi Candles", group="Candle Settings")
+bull_col   = input.color(color.new(#26A69A, 0), "HA Bull Color", group="Candle Settings")
+bear_col   = input.color(color.new(#EF5350, 0), "HA Bear Color", group="Candle Settings")
+
+// Signal Settings
+show_labels = input.bool(true, "Show Signal Labels", group="Signal Settings")
+
+// Table Settings
+table_pos_in = input.string("Bottom Left", "Table Location",
+     options=["Top Left", "Top Center", "Top Right",
+              "Middle Left", "Middle Center", "Middle Right",
+              "Bottom Left", "Bottom Center", "Bottom Right"],
+     group="Table Settings")
+
+table_pos = table_pos_in == "Top Left"      ? position.top_left :
+             table_pos_in == "Top Center"    ? position.top_center :
+             table_pos_in == "Top Right"     ? position.top_right :
+             table_pos_in == "Middle Left"   ? position.middle_left :
+             table_pos_in == "Middle Center" ? position.middle_center :
+             table_pos_in == "Middle Right"  ? position.middle_right :
+             table_pos_in == "Bottom Left"   ? position.bottom_left :
+             table_pos_in == "Bottom Center" ? position.bottom_center :
+                                               position.bottom_right
+
+// Confluence Settings
+vol_len  = input.int(20,   "Volume MA Length",         group="Confluence Settings")
+vol_mult = input.float(1.2, "Volume Surge Multiplier", step=0.1, group="Confluence Settings")
+
+// ─────────────────────────────────────────
+// HEIKENASHI CALCULATION
+// ─────────────────────────────────────────
+ha_close = (open + high + low + close) / 4
+var float ha_open = na
+ha_open := na(ha_open[1]) ? (open + close) / 2 : (ha_open[1] + ha_close[1]) / 2
+ha_high  = math.max(high, math.max(ha_open, ha_close))
+ha_low   = math.min(low,  math.min(ha_open, ha_close))
+
+// Source selection for EMA/RSI
+src_close = use_ha ? ha_close : close
+src_open  = use_ha ? ha_open  : open
+src_high  = use_ha ? ha_high  : high
+src_low   = use_ha ? ha_low   : low
+
+// ─────────────────────────────────────────
+// PLOT HEIKENASHI CANDLES
+// ─────────────────────────────────────────
+ha_bull  = src_close >= src_open
+ha_color = ha_bull ? bull_col : bear_col
+
+plotcandle(show_ha ? src_open : na, show_ha ? src_high : na,
+           show_ha ? src_low  : na, show_ha ? src_close : na,
+           "HA Candles", ha_color, ha_color,
+           bordercolor=ha_color)
+
+// ─────────────────────────────────────────
+// EMA CALCULATIONS
+// ─────────────────────────────────────────
+ema1   = ta.ema(src_close, ema1_len)
+ema2   = ta.ema(src_close, ema2_len)
+ema3   = ta.ema(src_close, ema3_len)
+ema_h  = ta.ema(high,      ema_h_len)
+ema_l  = ta.ema(low,       ema_l_len)
+
+plot(ema1,  "EMA 1",    ema1_col, 2)
+plot(ema2,  "EMA 2",    ema2_col, 2)
+plot(ema3,  "EMA 3",    ema3_col, 2)
+plot(ema_h, "EMA High", ema_h_col, 1, plot.style_line)
+plot(ema_l, "EMA Low",  ema_l_col, 1, plot.style_line)
+
+// ─────────────────────────────────────────
+// RSI
+// ─────────────────────────────────────────
+rsi_val = ta.rsi(rsi_src, rsi_len)
+
+// ─────────────────────────────────────────
+// STOCHASTIC
+// ─────────────────────────────────────────
+stoch_raw = ta.stoch(src_close, src_high, src_low, stoch_k)
+k_line    = ta.sma(stoch_raw, stoch_smo)
+d_line    = ta.sma(k_line, stoch_d)
+
+// Crossover detection
+k_cross_up   = ta.crossover(k_line,  d_line)
+k_cross_down = ta.crossunder(k_line, d_line)
+
+// ─────────────────────────────────────────
+// SIGNAL CONDITIONS
+// ─────────────────────────────────────────
+//price_above_ema1 = src_close > ema1
+//price_below_ema1 = src_close < ema1
+price_above_ema1 = src_close > ema_h
+price_below_ema1 = src_close < ema_l
+rsi_bull         = rsi_val > 50
+rsi_bear         = rsi_val < 50
+stoch_from_below = k_cross_up  and k_line < stoch_ob   // crossed up, not yet OB
+stoch_from_above = k_cross_down and k_line > stoch_os  // crossed down, not yet OS
+
+buy_signal  = price_above_ema1 and rsi_bull and stoch_from_below
+sell_signal = price_below_ema1 and rsi_bear and stoch_from_above
+
+// ─────────────────────────────────────────
+// CONFLUENCE FACTORS + GRADE
+// ─────────────────────────────────────────
+vol_ma        = ta.sma(volume, vol_len)
+vol_surge     = volume > vol_ma * vol_mult      // volume surge vs average
+ema_bull_stack = ema1 > ema2 and ema2 > ema3    // bullish EMA alignment
+ema_bear_stack = ema1 < ema2 and ema2 < ema3    // bearish EMA alignment
+buy_confirm   = close > close[1]                // 2nd candle confirms up
+sell_confirm  = close < close[1]                // 2nd candle confirms down
+
+// Count extra confluence factors (breakout + rsi + stoch already required)
+buy_conf_count  = (ema_bull_stack ? 1 : 0) + (vol_surge ? 1 : 0) + (buy_confirm ? 1 : 0)
+sell_conf_count = (ema_bear_stack ? 1 : 0) + (vol_surge ? 1 : 0) + (sell_confirm ? 1 : 0)
+
+buy_grade  = buy_conf_count >= 3 ? "A" : buy_conf_count == 2 ? "B" : "C"
+sell_grade = sell_conf_count >= 3 ? "A" : sell_conf_count == 2 ? "B" : "C"
+
+grade_desc(g) => g == "A" ? "FULL confluence" : g == "B" ? "PARTIAL confluence" : "WEAK confluence"
+mark(cond)    => cond ? "✓" : "✗"
+
+// Build detail breakdown strings
+buy_detail =
+     "Grade " + buy_grade + " = breakout + " + grade_desc(buy_grade) + "\n" +
+     "• Bullish breakout above EMA High " + mark(price_above_ema1) + "\n" +
+     "• EMA trend stacked bullish " + mark(ema_bull_stack) + "\n" +
+     "• RSI(" + str.tostring(rsi_len) + ") > 50 " + mark(rsi_bull) + "\n" +
+     "• Stoch %K crossed up (not OB) " + mark(stoch_from_below) + "\n" +
+     "• Volume: surge vs avg " + mark(vol_surge) + "\n" +
+     "• 2nd candle confirmed beyond signal " + mark(buy_confirm)
+
+sell_detail =
+     "Grade " + sell_grade + " = breakout + " + grade_desc(sell_grade) + "\n" +
+     "• Bearish breakout below EMA Low " + mark(price_below_ema1) + "\n" +
+     "• EMA trend stacked bearish " + mark(ema_bear_stack) + "\n" +
+     "• RSI(" + str.tostring(rsi_len) + ") < 50 " + mark(rsi_bear) + "\n" +
+     "• Stoch %K crossed down (not OS) " + mark(stoch_from_above) + "\n" +
+     "• Volume: surge vs avg " + mark(vol_surge) + "\n" +
+     "• 2nd candle confirmed beyond signal " + mark(sell_confirm)
+
+// ─────────────────────────────────────────
+// SIGNAL LABELS
+// ─────────────────────────────────────────
+// ─────────────────────────────────────────
+// SIGNAL LABELS (grade + hover tooltip breakdown)
+// ─────────────────────────────────────────
+if show_labels and buy_signal
+    label.new(bar_index, low, "▲ " + buy_grade,
+              yloc      = yloc.belowbar,
+              color     = color.new(#26A69A, 0),
+              textcolor = color.white,
+              style     = label.style_label_up,
+              size      = size.small,
+              tooltip   = buy_detail)
+
+if show_labels and sell_signal
+    label.new(bar_index, high, "▼ " + sell_grade,
+              yloc      = yloc.abovebar,
+              color     = color.new(#EF5350, 0),
+              textcolor = color.white,
+              style     = label.style_label_down,
+              size      = size.small,
+              tooltip   = sell_detail)
+
+// ─────────────────────────────────────────
+// BACKGROUND HIGHLIGHT ON SIGNALS
+// ─────────────────────────────────────────
+bgcolor(buy_signal  ? color.new(#26A69A, 88) : na, title="Buy Signal BG")
+bgcolor(sell_signal ? color.new(#EF5350, 88) : na, title="Sell Signal BG")
+
+// ─────────────────────────────────────────
+// INFO TABLE — Bottom Right
+// ─────────────────────────────────────────
+var table info_table = table.new(
+     table_pos, 2, 6,
+     bgcolor      = color.new(#1E1E2E, 10),
+     border_color = color.new(#555577, 60),
+     border_width = 1, frame_color = color.new(#7C7CAA, 40), frame_width = 1)
+
+// Helper: stoch status text
+stoch_status() =>
+    if k_cross_up
+        "▲ K crossed UP"
+    else if k_cross_down
+        "▼ K crossed DOWN"
+    else if k_line > d_line
+        "K > D (Bullish)"
+    else
+        "K < D (Bearish)"
+
+stoch_status_col() =>
+    if k_cross_up
+        color.new(#26A69A, 0)
+    else if k_cross_down
+        color.new(#EF5350, 0)
+    else if k_line > d_line
+        color.new(#4CAF50, 30)
+    else
+        color.new(#F44336, 30)
+
+signal_text = buy_signal ? "◆ BUY" : sell_signal ? "◆ SELL" : "—"
+signal_col  = buy_signal ? color.new(#26A69A, 0) : sell_signal ? color.new(#EF5350, 0) : color.new(#888888, 0)
+
+// Header row
+table.cell(info_table, 0, 0, "Indicator",   text_color=#AAAACC, bgcolor=color.new(#2A2A45, 10), text_size=size.small, text_halign=text.align_left)
+table.cell(info_table, 1, 0, "Value",        text_color=#AAAACC, bgcolor=color.new(#2A2A45, 10), text_size=size.small, text_halign=text.align_right)
+
+// RSI Row
+table.cell(info_table, 0, 1, "RSI", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+table.cell(info_table, 1, 1, str.tostring(rsi_val, "#.##"),
+           text_color = rsi_val > 50 ? color.new(#26A69A, 0) : color.new(#EF5350, 0),
+           text_size  = size.small, text_halign = text.align_right)
+
+// Stoch K Row
+table.cell(info_table, 0, 2, "Stoch %K", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+table.cell(info_table, 1, 2, str.tostring(k_line, "#.##"),
+           text_color = k_line > 50 ? color.new(#26A69A, 0) : color.new(#EF5350, 0),
+           text_size  = size.small, text_halign = text.align_right)
+
+// Stoch D Row
+table.cell(info_table, 0, 3, "Stoch %D", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+table.cell(info_table, 1, 3, str.tostring(d_line, "#.##"),
+           text_color = d_line > 50 ? color.new(#26A69A, 0) : color.new(#EF5350, 0),
+           text_size  = size.small, text_halign = text.align_right)
+
+// Stoch Status Row
+table.cell(info_table, 0, 4, "Stoch Cross", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+table.cell(info_table, 1, 4, stoch_status(),
+           text_color = stoch_status_col(),
+           text_size  = size.small, text_halign = text.align_right)
+
+// Signal Row
+table.cell(info_table, 0, 5, "Signal",     text_color=color.white, text_size=size.small, text_halign=text.align_left)
+table.cell(info_table, 1, 5, signal_text,  text_color=signal_col,  text_size=size.small, text_halign=text.align_right)
+
+// ─────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────
+// Static alertcondition() alerts (kept for alert-creation dropdown)
+alertcondition(buy_signal,  "BUY Signal",  "EMA+RSI+Stoch BUY signal fired")
+alertcondition(sell_signal, "SELL Signal", "EMA+RSI+Stoch SELL signal fired")
+
+// Dynamic pop-up alerts with full signal trigger breakdown
+if buy_signal
+    alert("◆ BUY " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) +
+          "  (TF: " + timeframe.period + ")\n" + buy_detail,
+          alert.freq_once_per_bar_close)
+
+if sell_signal
+    alert("◆ SELL " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) +
+          "  (TF: " + timeframe.period + ")\n" + sell_detail,
+          alert.freq_once_per_bar_close)

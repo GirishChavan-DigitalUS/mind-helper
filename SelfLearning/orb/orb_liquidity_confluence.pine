@@ -1,0 +1,473 @@
+//@version=6
+// =============================================================================
+//  ORB + Liquidity Confluence  [Dual-Engine]
+//  -----------------------------------------------------------------------------
+//  A Support/Resistance + Liquidity confluence tool that trades key levels two
+//  complementary ways off the SAME map of levels:
+//
+//   ENGINE A  - ORB Breakout / Continuation   (momentum, @no_risk_no_premium)
+//               15-min ORB break + YHOD/YLOD (PDH/PDL) alignment, then wait for
+//               the RETEST and the HOLD (the broken level flips to S/R) before a
+//               signal fires. A+ = break aligned with PDH/PDL + retest holds.
+//
+//   ENGINE B  - Level Fade / Reversal         (mean-revert, @thetechlao 0DTE)
+//               Price at a major level on a FIRST touch with a FAST approach and
+//               an RSI 1-min extreme (>70 = short/puts, <30 = long/calls) = an
+//               exhaustion fade. Skips ~80% of setups that don't check all boxes.
+//
+//  Shared map of Support / Resistance & Liquidity:
+//    * YHOD/PDH, YLOD/PDL, PDC          (previous-day levels - institutional)
+//    * PMH / PML                        (premarket high / low)
+//    * ORB High / Low                   (first 5/15/30-min range)
+//    * Nearest whole-dollar / psych     (round-number magnets)
+//    * Buy-side / sell-side liquidity pools + SWEEP (stop-run) detection.
+//
+//  DESIGN NOTES
+//    * "Today only": all level lines/labels are deletable objects rebuilt each
+//      new regular session, so only the most-recent session shows (weekends /
+//      holidays fall back to the last valid session automatically).
+//    * Non-repainting: every signal is confirmed on a closed bar. The whole
+//      point of the strategy is patience - wait for break -> retest -> hold, or
+//      wait for a clean first touch + RSI extreme.
+//    * Recommended chart timeframe: 1m - 5m (matches the source methodology).
+// =============================================================================
+indicator("ORB + Liquidity Confluence [Dual-Engine]", shorttitle="ORB+LIQ", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=100)
+
+// =============================================================================
+//  INPUTS
+// =============================================================================
+grpGen = "General / Session"
+sess   = input.session("0930-1600", "Regular Session", group = grpGen)
+tz     = input.string("America/New_York", "Session Timezone", group = grpGen)
+orChoice = input.string("15", "Opening Range Duration (min)", options = ["5", "15", "30"], group = grpGen)
+primeSess = input.session("0930-1100", "Prime Hours (scored higher)", group = grpGen, tooltip = "Setups inside this window get a confluence bonus. Classic prime windows: the first 90 min after the open and the last hour.")
+
+grpEng = "Engines"
+enableA = input.bool(true,  "Engine A - ORB Breakout / Continuation", group = grpEng)
+enableB = input.bool(true,  "Engine B - Level Fade / Reversal (RSI)", group = grpEng)
+
+grpLvl = "Key Levels (S/R)"
+useYHL   = input.bool(true, "YHOD / YLOD  (Prev Day High / Low = PDH/PDL)", group = grpLvl)
+usePDC   = input.bool(true, "PDC  (Previous Day Close)", group = grpLvl)
+usePM    = input.bool(true, "PMH / PML  (Premarket High / Low)", group = grpLvl)
+pmSess   = input.session("0400-0930", "Premarket Session (PMH/PML)", group = grpLvl)
+useOR    = input.bool(true, "ORB High / Low", group = grpLvl)
+useRound = input.bool(true, "Nearest Whole-Dollar Levels", group = grpLvl)
+rnStep   = input.float(1.0, "Whole-Dollar Step ($)", minval = 0.01, step = 0.25, group = grpLvl, tooltip = "Distance between round-number magnets. 1.0 suits SPY-priced instruments; raise for higher-priced tickers.")
+usePsych = input.bool(true, "Psychological Levels ($5 / $10)", group = grpLvl)
+psychStep= input.float(5.0, "Psychological Step ($)", minval = 0.1, step = 0.5, group = grpLvl)
+
+grpLiq = "Liquidity"
+useSweep = input.bool(true, "Detect Liquidity Sweeps (stop-runs) at PDH/PDL & ORB", group = grpLiq, tooltip = "A wick pokes BEYOND a level then the bar CLOSES back inside = liquidity swept / stop-run (not a real breakout). Marked separately from valid breaks.")
+
+grpA = "Engine A - ORB Breakout"
+retTolMode = input.string("ATR", "Retest Tolerance Basis", options = ["ATR", "Percent"], group = grpA, tooltip = "How close price must return to the broken ORB level to count as a RETEST touch.")
+retTolAtr  = input.float(0.25, "Retest Tolerance (ATR mult)", minval = 0.0, step = 0.05, group = grpA)
+retTolPct  = input.float(0.10, "Retest Tolerance (% of price)", minval = 0.0, step = 0.01, group = grpA)
+noChaseAtr = input.float(2.0, "No-Chase: max distance from level at confirm (ATR mult)", minval = 0.0, step = 0.25, group = grpA, tooltip = "If, at the confirmation bar, price is more than this many ATRs beyond the broken level, the move is 'extended' and the signal is suppressed - don't chase.")
+reArmA     = input.bool(true, "Allow re-arm (new break attempt) after a signal", group = grpA)
+
+grpB = "Engine B - Level Fade (RSI)"
+rsiLen   = input.int(14, "RSI Length", minval = 1, group = grpB)
+rsiOB    = input.int(70, "RSI Overbought (fade short / puts)", minval = 50, maxval = 100, group = grpB)
+rsiOS    = input.int(30, "RSI Oversold (fade long / calls)", minval = 0, maxval = 50, group = grpB)
+fadeTolMode = input.string("ATR", "Level Touch Tolerance Basis", options = ["ATR", "Percent"], group = grpB)
+fadeTolAtr  = input.float(0.15, "Touch Tolerance (ATR mult)", minval = 0.0, step = 0.05, group = grpB)
+fadeTolPct  = input.float(0.08, "Touch Tolerance (% of price)", minval = 0.0, step = 0.01, group = grpB)
+spdLook  = input.int(5, "Fast-Approach Lookback (bars)", minval = 1, group = grpB, tooltip = "Speed of arrival into the level = |price move over this many bars| / ATR. Fast approaches into a level score higher (momentum into exhaustion).")
+spdThresh= input.float(1.0, "Fast-Approach Min Speed (ATR)", minval = 0.0, step = 0.1, group = grpB)
+fadeQualityOnly = input.bool(false, "Only fade high-quality levels (PDH/PDL/PMH/PML)", group = grpB, tooltip = "When on, round-number-only touches are ignored by the fade engine; only previous-day and premarket levels qualify.")
+
+grpConf = "Confluence / Grading"
+volLen  = input.int(20, "Volume MA Length", minval = 1, group = grpConf)
+volMult = input.float(1.5, "Volume Surge Multiplier (x avg)", minval = 0.1, step = 0.1, group = grpConf)
+useVWAP = input.bool(true, "Use VWAP alignment in grade", group = grpConf)
+atrLen  = input.int(14, "ATR Length", minval = 1, group = grpConf)
+
+grpRisk = "Risk Overlay (informational)"
+showRisk   = input.bool(true, "Show suggested stop / target on signals", group = grpRisk)
+targetMode = input.string("OR Range", "Target Basis", options = ["OR Range", "R Multiple", "ATR"], group = grpRisk)
+rMult      = input.float(2.0, "R Multiple / ATR Target Mult", minval = 0.1, step = 0.1, group = grpRisk)
+stopAtr    = input.float(0.5, "Stop buffer beyond level/retest (ATR mult)", minval = 0.0, step = 0.1, group = grpRisk)
+
+grpUI = "Dashboard & Style"
+showTable = input.bool(true, "Show Status Table", group = grpUI)
+tblPos    = input.string("Top Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpUI)
+showLevels= input.bool(true, "Draw Key Level Lines", group = grpUI)
+showLbls  = input.bool(true, "Show Level Price Labels", group = grpUI)
+
+grpCol = "Colors"
+colYHOD = input.color(color.orange,  "YHOD / PDH", group = grpCol, inline = "c1")
+colYLOD = input.color(color.orange,  "YLOD / PDL", group = grpCol, inline = "c1")
+colPDC  = input.color(color.gray,    "PDC", group = grpCol, inline = "c2")
+colPM   = input.color(color.fuchsia, "PMH / PML", group = grpCol, inline = "c2")
+colORH  = input.color(color.green,   "ORB High", group = grpCol, inline = "c3")
+colORL  = input.color(color.red,     "ORB Low", group = grpCol, inline = "c3")
+colRN   = input.color(color.new(color.silver, 40), "Round #", group = grpCol, inline = "c4")
+colPsy  = input.color(color.new(color.teal, 30),   "Psych", group = grpCol, inline = "c4")
+colLong = input.color(color.lime,    "Long / Bull signal", group = grpCol, inline = "c5")
+colShort= input.color(color.red,     "Short / Bear signal", group = grpCol, inline = "c5")
+colFadeL= input.color(#00E5FF,       "Fade Long", group = grpCol, inline = "c6")
+colFadeS= input.color(#FF6D00,       "Fade Short", group = grpCol, inline = "c6")
+colSweep= input.color(color.yellow,  "Liquidity Sweep", group = grpCol, inline = "c7")
+
+// =============================================================================
+//  CORE CALCS
+// =============================================================================
+orMin = int(str.tonumber(orChoice))
+orMs  = orMin * 60 * 1000
+
+atr    = ta.atr(atrLen)
+rsi    = ta.rsi(close, rsiLen)
+volMa  = ta.sma(volume, volLen)
+volSurge = not na(volMa) and volume > volMa * volMult
+vwap   = ta.vwap(hlc3)
+
+// --- Session detection -------------------------------------------------------
+t       = time(timeframe.period, sess, tz)
+inSess  = not na(t)
+newSess = inSess and (na(t[1]) or not inSess[1])
+inPrime = not na(time(timeframe.period, primeSess, tz))
+
+// --- Previous-day levels (stable, non-repainting) ---------------------------
+pdh = request.security(syminfo.tickerid, "D", high[1],  lookahead = barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],   lookahead = barmerge.lookahead_on)
+pdc = request.security(syminfo.tickerid, "D", close[1], lookahead = barmerge.lookahead_on)
+
+// --- Premarket high / low ---------------------------------------------------
+tpm    = time(timeframe.period, pmSess, tz)
+inPm   = not na(tpm)
+newPm  = inPm and (na(tpm[1]) or not inPm[1])
+var float pmh = na
+var float pml = na
+if newPm
+    pmh := high
+    pml := low
+else if inPm
+    pmh := math.max(pmh, high)
+    pml := math.min(pml, low)
+
+// --- Opening range build ----------------------------------------------------
+var float orH        = na
+var float orL        = na
+var int   sessOpenT  = na
+var int   orStartBar = na
+var bool  orLocked   = false
+var float orRange    = na
+
+if newSess
+    orH        := high
+    orL        := low
+    sessOpenT  := t
+    orStartBar := bar_index
+    orLocked   := false
+    orRange    := na
+
+inWindow = inSess and not na(sessOpenT) and (t - sessOpenT < orMs)
+if inWindow and not newSess
+    orH := math.max(orH, high)
+    orL := math.min(orL, low)
+
+if (not orLocked) and (not na(orH)) and (not na(sessOpenT)) and (t - sessOpenT >= orMs)
+    orLocked := true
+    orRange  := orH - orL
+
+// --- Round-number magnets (nearest above / below) ---------------------------
+rnUp = math.ceil(close / rnStep) * rnStep
+rnDn = math.floor(close / rnStep) * rnStep
+psUp = math.ceil(close / psychStep) * psychStep
+psDn = math.floor(close / psychStep) * psychStep
+
+// --- Bias & "understand the day" --------------------------------------------
+bias    = not na(pdh) and close > pdh ? 1 : not na(pdl) and close < pdl ? -1 : 0
+trapped = not na(pdh) and not na(pdl) and close <= pdh and close >= pdl
+dayChar = na(orRange) or na(atr) ? "Building" : orRange > atr * 1.5 ? "Trend/Wide" : "Chop/Narrow"
+
+// =============================================================================
+//  LIQUIDITY SWEEP DETECTION  (wick beyond a level + close back inside)
+// =============================================================================
+sweepPDH = useSweep and not na(pdh) and high > pdh and close < pdh          // buy-side liquidity above PDH swept
+sweepPDL = useSweep and not na(pdl) and low  < pdl and close > pdl          // sell-side liquidity below PDL swept
+sweepORH = useSweep and orLocked and high > orH and close < orH
+sweepORL = useSweep and orLocked and low  < orL and close > orL
+sweepUp  = sweepPDH or sweepORH                                             // failed push up (bearish hint)
+sweepDn  = sweepPDL or sweepORL                                             // failed push down (bullish hint)
+
+// =============================================================================
+//  ENGINE A - ORB BREAKOUT -> RETEST -> HOLD
+//  Stage machine (per direction): 0 idle -> 1 broke -> 2 retested -> fire
+// =============================================================================
+retBand = retTolMode == "ATR" ? atr * retTolAtr : close * retTolPct / 100.0
+
+var int   aUp    = 0            // bull stage
+var int   aDn    = 0            // bear stage
+var float aUpLvl = na           // the broken level being traded (ORH for bull)
+var float aDnLvl = na
+
+longBrk  = false
+shortBrk = false
+var string aLongGrade  = na
+var string aShortGrade = na
+
+if newSess
+    aUp := 0
+    aDn := 0
+    aUpLvl := na
+    aDnLvl := na
+
+if enableA and orLocked
+    // ---- BULLISH path ----
+    if aUp == 0 and close > orH
+        aUp    := 1
+        aUpLvl := orH
+    if aUp == 1 and low <= orH + retBand          // pulled back to retest broken high
+        aUp := 2
+    if aUp == 2 and close > orH and close > open   // held: closes back above, bullish candle
+        notExtended = na(atr) or (close - orH) <= atr * noChaseAtr
+        if notExtended
+            longBrk := true
+            aUp := reArmA ? 0 : 3
+
+    // ---- BEARISH path ----
+    if aDn == 0 and close < orL
+        aDn    := 1
+        aDnLvl := orL
+    if aDn == 1 and high >= orL - retBand
+        aDn := 2
+    if aDn == 2 and close < orL and close < open
+        notExtendedD = na(atr) or (orL - close) <= atr * noChaseAtr
+        if notExtendedD
+            shortBrk := true
+            aDn := reArmA ? 0 : 3
+
+// =============================================================================
+//  ENGINE B - LEVEL FADE (first touch + fast approach + RSI extreme)
+// =============================================================================
+// Build the map of enabled levels each bar; find the nearest one + its quality.
+// (Levels are collected into arrays so the nearest is found in a global-scope
+//  loop - Pine functions cannot reassign globals, so we only push inside f_add.)
+fadeBand = fadeTolMode == "ATR" ? atr * fadeTolAtr : close * fadeTolPct / 100.0
+
+f_add(_arrL, _arrQ, _l, _q) =>
+    if not na(_l)
+        array.push(_arrL, _l)
+        array.push(_arrQ, _q)
+
+lv = array.new_float()
+lq = array.new_int()
+if useYHL
+    f_add(lv, lq, pdh, 2)
+    f_add(lv, lq, pdl, 2)
+if usePM
+    f_add(lv, lq, pmh, 2)
+    f_add(lv, lq, pml, 2)
+if usePDC
+    f_add(lv, lq, pdc, 2)
+if useOR and orLocked
+    f_add(lv, lq, orH, 1)
+    f_add(lv, lq, orL, 1)
+if useRound and not fadeQualityOnly
+    f_add(lv, lq, rnUp, 0)
+    f_add(lv, lq, rnDn, 0)
+if usePsych and not fadeQualityOnly
+    f_add(lv, lq, psUp, 0)
+    f_add(lv, lq, psDn, 0)
+
+nearDist = 1e12
+nLvl     = float(na)
+nQual    = 0
+if array.size(lv) > 0
+    for i = 0 to array.size(lv) - 1
+        d = math.abs(close - array.get(lv, i))
+        if d < nearDist
+            nearDist := d
+            nLvl     := array.get(lv, i)
+            nQual    := array.get(lq, i)
+
+isNear      = nearDist <= fadeBand
+justArrived = isNear and not isNear[1]                 // FIRST touch of this approach
+spd         = na(atr) or atr == 0 ? 0.0 : math.abs(close - close[spdLook]) / atr
+fastEnough  = spd >= spdThresh
+
+fadeShort = false
+fadeLong  = false
+if enableB and inSess and justArrived and fastEnough
+    if rsi >= rsiOB
+        fadeShort := true
+    else if rsi <= rsiOS
+        fadeLong := true
+
+// =============================================================================
+//  GRADING (shared rubric)  ->  A+ / A / B
+// =============================================================================
+f_grade(_isLong, _aligned, _rsiEx, _volOk, _vwapOk, _prime, _quality) =>
+    _score = 0
+    _score := _score + (_aligned ? 2 : 0)          // PDH/PDL alignment weighs most
+    _score := _score + (_rsiEx ? 1 : 0)
+    _score := _score + (_volOk ? 1 : 0)
+    _score := _score + (_vwapOk ? 1 : 0)
+    _score := _score + (_prime ? 1 : 0)
+    _score := _score + (_quality >= 2 ? 1 : 0)
+    _g = _score >= 5 ? "A+" : _score >= 3 ? "A" : "B"
+    [_g, _score]
+
+// Engine A grade: alignment = break in agreement with PDH/PDL (institutional)
+aLongAligned  = not na(pdh) and close > pdh
+aShortAligned = not na(pdl) and close < pdl
+vwapLongOk    = useVWAP and not na(vwap) and close > vwap
+vwapShortOk   = useVWAP and not na(vwap) and close < vwap
+
+[gLong, sLong]   = f_grade(true,  aLongAligned,  rsi > 50, volSurge, vwapLongOk,  inPrime, 2)
+[gShort, sShort] = f_grade(false, aShortAligned, rsi < 50, volSurge, vwapShortOk, inPrime, 2)
+
+// Engine B grade: RSI depth + speed + quality + volume + prime
+rsiDeepS = rsi >= rsiOB + 5
+rsiDeepL = rsi <= rsiOS - 5
+[gFadeS, sFadeS] = f_grade(false, false, rsiDeepS, volSurge, true, inPrime, nQual)
+[gFadeL, sFadeL] = f_grade(true,  false, rsiDeepL, volSurge, true, inPrime, nQual)
+
+// =============================================================================
+//  RISK OVERLAY (informational)
+// =============================================================================
+f_risk(_isLong, _entry, _lvl) =>
+    _stop = _isLong ? _lvl - atr * stopAtr : _lvl + atr * stopAtr
+    _risk = math.abs(_entry - _stop)
+    _tgt  = targetMode == "OR Range" and not na(orRange) ? (_isLong ? _entry + orRange : _entry - orRange) : targetMode == "ATR" ? (_isLong ? _entry + atr * rMult : _entry - atr * rMult) : (_isLong ? _entry + _risk * rMult : _entry - _risk * rMult)
+    [_stop, _tgt]
+
+// =============================================================================
+//  DRAWINGS - KEY LEVELS (today only)
+// =============================================================================
+var line[]  lvlLines = array.new_line()
+var label[] lvlLbls  = array.new_label()
+var label[] sigLbls  = array.new_label()
+
+f_clearArr() =>
+    if array.size(lvlLines) > 0
+        for i = 0 to array.size(lvlLines) - 1
+            line.delete(array.get(lvlLines, i))
+        array.clear(lvlLines)
+    if array.size(lvlLbls) > 0
+        for i = 0 to array.size(lvlLbls) - 1
+            label.delete(array.get(lvlLbls, i))
+        array.clear(lvlLbls)
+
+f_drawLvl(_lvl, _col, _txt, _style) =>
+    if showLevels and not na(_lvl)
+        _x1 = na(orStartBar) ? bar_index - 1 : orStartBar
+        _ln = line.new(_x1, _lvl, bar_index, _lvl, xloc = xloc.bar_index, color = _col, width = 1, style = _style)
+        array.push(lvlLines, _ln)
+        if showLbls
+            _lb = label.new(bar_index, _lvl, _txt + "  " + str.tostring(_lvl, format.mintick), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(_col, 88), textcolor = _col, size = size.small)
+            array.push(lvlLbls, _lb)
+
+// Rebuild the static level lines once per bar in-session so they track the
+// latest bar_index (kept lightweight: cleared + redrawn only while in session).
+if inSess
+    f_clearArr()
+    if useYHL
+        f_drawLvl(pdh, colYHOD, "YHOD/PDH", line.style_solid)
+        f_drawLvl(pdl, colYLOD, "YLOD/PDL", line.style_solid)
+    if usePDC
+        f_drawLvl(pdc, colPDC, "PDC", line.style_dotted)
+    if usePM
+        f_drawLvl(pmh, colPM, "PMH", line.style_dashed)
+        f_drawLvl(pml, colPM, "PML", line.style_dashed)
+    if useOR and orLocked
+        f_drawLvl(orH, colORH, "ORH", line.style_solid)
+        f_drawLvl(orL, colORL, "ORL", line.style_solid)
+    if useRound
+        f_drawLvl(rnUp, colRN, "R$", line.style_dotted)
+        f_drawLvl(rnDn, colRN, "R$", line.style_dotted)
+    if usePsych
+        f_drawLvl(psUp, colPsy, "Psy", line.style_dotted)
+        f_drawLvl(psDn, colPsy, "Psy", line.style_dotted)
+
+// =============================================================================
+//  SIGNAL MARKERS + GRADE LABELS + RISK
+// =============================================================================
+if newSess and array.size(sigLbls) > 0
+    for i = 0 to array.size(sigLbls) - 1
+        label.delete(array.get(sigLbls, i))
+    array.clear(sigLbls)
+
+f_sig(_isLong, _grade, _lvl, _col, _tag) =>
+    _y   = _isLong ? low - atr * 0.5 : high + atr * 0.5
+    _sty = _isLong ? label.style_label_up : label.style_label_down
+    _txt = _tag + " " + _grade
+    if showRisk and not na(_lvl)
+        [_st, _tg] = f_risk(_isLong, close, _lvl)
+        _txt := _txt + "\nE " + str.tostring(close, format.mintick) + "  S " + str.tostring(_st, format.mintick) + "  T " + str.tostring(_tg, format.mintick)
+    _lb = label.new(bar_index, _y, _txt, xloc = xloc.bar_index, style = _sty, color = _col, textcolor = color.white, size = size.small)
+    array.push(sigLbls, _lb)
+
+if longBrk
+    aLongGrade := gLong
+    f_sig(true, gLong, aUpLvl, colLong, "ORB▲")
+if shortBrk
+    aShortGrade := gShort
+    f_sig(false, gShort, aDnLvl, colShort, "ORB▼")
+if fadeLong
+    f_sig(true, gFadeL, nLvl, colFadeL, "FADE▲")
+if fadeShort
+    f_sig(false, gFadeS, nLvl, colFadeS, "FADE▼")
+
+plotshape(longBrk,  title = "ORB Long Break",  style = shape.triangleup,   location = location.belowbar, color = colLong,  size = size.small)
+plotshape(shortBrk, title = "ORB Short Break", style = shape.triangledown, location = location.abovebar, color = colShort, size = size.small)
+plotshape(fadeLong,  title = "Fade Long",  style = shape.diamond, location = location.belowbar, color = colFadeL, size = size.tiny)
+plotshape(fadeShort, title = "Fade Short", style = shape.diamond, location = location.abovebar, color = colFadeS, size = size.tiny)
+plotshape(sweepUp,  title = "Sweep (up rejected)",   style = shape.xcross, location = location.abovebar, color = colSweep, size = size.tiny)
+plotshape(sweepDn,  title = "Sweep (down rejected)", style = shape.xcross, location = location.belowbar, color = colSweep, size = size.tiny)
+
+// Optional VWAP plot for context
+plot(useVWAP ? vwap : na, title = "VWAP", color = color.new(color.blue, 0), linewidth = 1)
+
+// =============================================================================
+//  DASHBOARD
+// =============================================================================
+f_tblPos(_p) =>
+    _p == "Top Left" ? position.top_left : _p == "Bottom Right" ? position.bottom_right : _p == "Bottom Left" ? position.bottom_left : position.top_right
+
+var table dash = na
+if showTable and barstate.islast
+    if not na(dash)
+        table.delete(dash)
+    dash := table.new(f_tblPos(tblPos), 2, 12, border_width = 1, frame_color = color.new(color.gray, 50), frame_width = 1)
+    biasTxt = bias == 1 ? "BULL (>PDH)" : bias == -1 ? "BEAR (<PDL)" : trapped ? "TRAPPED (chop)" : "Neutral"
+    biasCol = bias == 1 ? color.new(color.green, 0) : bias == -1 ? color.new(color.red, 0) : color.new(color.orange, 0)
+    table.cell(dash, 0, 0, "ORB + LIQ", text_color = color.white, bgcolor = color.new(color.blue, 0), text_size = size.small)
+    table.cell(dash, 1, 0, dayChar, text_color = color.white, bgcolor = color.new(color.blue, 0), text_size = size.small)
+    table.cell(dash, 0, 1, "Bias", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 1, biasTxt, text_size = size.small, text_color = color.white, bgcolor = biasCol)
+    table.cell(dash, 0, 2, "RSI(" + str.tostring(rsiLen) + ")", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    rsiCol = rsi >= rsiOB ? color.new(color.red, 0) : rsi <= rsiOS ? color.new(color.green, 0) : color.new(color.gray, 40)
+    table.cell(dash, 1, 2, str.tostring(rsi, "#.0"), text_size = size.small, text_color = color.white, bgcolor = rsiCol)
+    table.cell(dash, 0, 3, "YHOD/PDH", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 3, na(pdh) ? "-" : str.tostring(pdh, format.mintick), text_size = size.small, text_color = colYHOD, bgcolor = color.new(color.black, 60))
+    table.cell(dash, 0, 4, "YLOD/PDL", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 4, na(pdl) ? "-" : str.tostring(pdl, format.mintick), text_size = size.small, text_color = colYLOD, bgcolor = color.new(color.black, 60))
+    table.cell(dash, 0, 5, "PMH", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 5, na(pmh) ? "-" : str.tostring(pmh, format.mintick), text_size = size.small, text_color = colPM, bgcolor = color.new(color.black, 60))
+    table.cell(dash, 0, 6, "PML", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 6, na(pml) ? "-" : str.tostring(pml, format.mintick), text_size = size.small, text_color = colPM, bgcolor = color.new(color.black, 60))
+    table.cell(dash, 0, 7, "ORH", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 7, na(orH) or not orLocked ? "..." : str.tostring(orH, format.mintick), text_size = size.small, text_color = colORH, bgcolor = color.new(color.black, 60))
+    table.cell(dash, 0, 8, "ORL", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 8, na(orL) or not orLocked ? "..." : str.tostring(orL, format.mintick), text_size = size.small, text_color = colORL, bgcolor = color.new(color.black, 60))
+    table.cell(dash, 0, 9, "Nearest Lvl", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 9, na(nLvl) ? "-" : str.tostring(nLvl, format.mintick) + (isNear ? " *touch" : ""), text_size = size.small, text_color = color.white, bgcolor = color.new(color.black, 60))
+    lastA = na(aLongGrade) and na(aShortGrade) ? "-" : not na(aLongGrade) ? "▲ " + aLongGrade : "▼ " + aShortGrade
+    table.cell(dash, 0, 10, "Last ORB", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 10, lastA, text_size = size.small, text_color = color.white, bgcolor = color.new(color.black, 60))
+    table.cell(dash, 0, 11, "Prime Hrs", text_size = size.small, text_color = color.white, bgcolor = color.new(color.gray, 70))
+    table.cell(dash, 1, 11, inPrime ? "YES" : "no", text_size = size.small, text_color = color.white, bgcolor = inPrime ? color.new(color.green, 0) : color.new(color.gray, 40))
+
+// =============================================================================
+//  ALERTS
+// =============================================================================
+alertcondition(longBrk,   "ORB Long Break (A/A+)",  "ORB breakout LONG confirmed (retest held) on {{ticker}}")
+alertcondition(shortBrk,  "ORB Short Break (A/A+)", "ORB breakdown SHORT confirmed (retest held) on {{ticker}}")
+alertcondition(fadeLong,  "Fade Long (RSI oversold at level)",   "Level FADE LONG (first touch + RSI oversold) on {{ticker}}")
+alertcondition(fadeShort, "Fade Short (RSI overbought at level)","Level FADE SHORT (first touch + RSI overbought) on {{ticker}}")
+alertcondition(sweepUp,   "Liquidity Sweep (up rejected)",   "Buy-side liquidity swept / stop-run rejected on {{ticker}}")
+alertcondition(sweepDn,   "Liquidity Sweep (down rejected)", "Sell-side liquidity swept / stop-run rejected on {{ticker}}")

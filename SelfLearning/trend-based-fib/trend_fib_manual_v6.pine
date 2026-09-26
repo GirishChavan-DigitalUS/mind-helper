@@ -1,0 +1,208 @@
+//@version=6
+// =============================================================================
+// Trend Fib Zones — Manual / Interactive (Pine v6)
+// Drag swing-low and swing-high lines on the chart, get zones BOTH directions.
+// UP zones in green shades, DOWN zones in red shades — no direction toggle needed.
+// Uses input.price() for interactive on-chart selection.
+// Style: NO multiline statements — every expression on a single physical line.
+// =============================================================================
+indicator("Trend Fib Zones [Manual]", overlay=true, max_labels_count=50)
+
+// ─── INPUTS ─────────────────────────────────────────────────────────────────
+
+swLow    = input.price(defval=0.0, title="⬆ Swing Low  — drag on chart", confirm=true, group="Swing Points")
+swHigh   = input.price(defval=0.0, title="⬇ Swing High — drag on chart", confirm=true, group="Swing Points")
+
+gpLo     = input.float(0.500, "Golden Pocket lower %",  step=0.01, group="Zone Boundaries")
+gpHi     = input.float(0.618, "Golden Pocket upper %",  step=0.01, group="Zone Boundaries")
+dzLo     = input.float(1.500, "Decision Zone lower %",  step=0.01, group="Zone Boundaries")
+dzHi     = input.float(1.700, "Decision Zone upper %",  step=0.01, group="Zone Boundaries")
+ezLo     = input.float(2.382, "Extreme Zone lower %",   step=0.01, group="Zone Boundaries")
+ezHi     = input.float(2.618, "Extreme Zone upper %",   step=0.01, group="Zone Boundaries")
+
+showAll  = input.bool(false, "Show all standard fib levels", group="Display")
+showDash = input.bool(true, "Show level table",            group="Display")
+zAlpha   = input.int(85, "Zone fill transparency", minval=50, maxval=95, group="Display")
+
+// ─── COLORS ─────────────────────────────────────────────────────────────────
+
+upGP  = #00C853
+upDZ  = #00E676
+upEZ  = #B9F6CA
+dnGP  = #FF1744
+dnDZ  = #FF5252
+dnEZ  = #FF8A80
+
+// ─── CALCULATIONS ───────────────────────────────────────────────────────────
+
+rng    = math.abs(swHigh - swLow)
+valid  = rng > syminfo.mintick * 5
+lo     = math.min(swLow, swHigh)
+hi     = math.max(swLow, swHigh)
+
+fibUp(float pct) => lo + pct * rng
+fibDn(float pct) => hi - pct * rng
+
+// ─── UP (bullish) levels ────────────────────────────────────────────────────
+
+uGPlo = valid ? fibUp(gpLo) : na
+uGPhi = valid ? fibUp(gpHi) : na
+uDZlo = valid ? fibUp(dzLo) : na
+uDZhi = valid ? fibUp(dzHi) : na
+uEZlo = valid ? fibUp(ezLo) : na
+uEZhi = valid ? fibUp(ezHi) : na
+u000  = valid ? fibUp(0.000) : na
+u100  = valid ? fibUp(1.000) : na
+u200  = valid ? fibUp(2.000) : na
+u236  = valid ? fibUp(0.236) : na
+u382  = valid ? fibUp(0.382) : na
+u786  = valid ? fibUp(0.786) : na
+u127  = valid ? fibUp(1.272) : na
+u162  = valid ? fibUp(1.618) : na
+
+// ─── DOWN (bearish) levels ──────────────────────────────────────────────────
+
+dGPlo = valid ? fibDn(gpLo) : na
+dGPhi = valid ? fibDn(gpHi) : na
+dDZlo = valid ? fibDn(dzLo) : na
+dDZhi = valid ? fibDn(dzHi) : na
+dEZlo = valid ? fibDn(ezLo) : na
+dEZhi = valid ? fibDn(ezHi) : na
+d000  = valid ? fibDn(0.000) : na
+d100  = valid ? fibDn(1.000) : na
+d200  = valid ? fibDn(2.000) : na
+d236  = valid ? fibDn(0.236) : na
+d382  = valid ? fibDn(0.382) : na
+d786  = valid ? fibDn(0.786) : na
+d127  = valid ? fibDn(1.272) : na
+d162  = valid ? fibDn(1.618) : na
+
+// ─── ZONE PLOTS + FILLS — UP (green) ───────────────────────────────────────
+
+puGPlo = plot(valid ? uGPlo : na, "UP GP lo", color=color.new(upGP, 40), linewidth=1)
+puGPhi = plot(valid ? uGPhi : na, "UP GP hi", color=color.new(upGP, 40), linewidth=1)
+puDZlo = plot(valid ? uDZlo : na, "UP DZ lo", color=color.new(upDZ, 40), linewidth=1)
+puDZhi = plot(valid ? uDZhi : na, "UP DZ hi", color=color.new(upDZ, 40), linewidth=1)
+puEZlo = plot(valid ? uEZlo : na, "UP EZ lo", color=color.new(upEZ, 40), linewidth=1)
+puEZhi = plot(valid ? uEZhi : na, "UP EZ hi", color=color.new(upEZ, 40), linewidth=1)
+
+fill(puGPlo, puGPhi, color=color.new(upGP, zAlpha), title="UP Golden Pocket")
+fill(puDZlo, puDZhi, color=color.new(upDZ, zAlpha), title="UP Decision Zone")
+fill(puEZlo, puEZhi, color=color.new(upEZ, zAlpha), title="UP Extreme Zone")
+
+// ─── ZONE PLOTS + FILLS — DOWN (red) ───────────────────────────────────────
+
+pdGPlo = plot(valid ? dGPlo : na, "DN GP lo", color=color.new(dnGP, 40), linewidth=1)
+pdGPhi = plot(valid ? dGPhi : na, "DN GP hi", color=color.new(dnGP, 40), linewidth=1)
+pdDZlo = plot(valid ? dDZlo : na, "DN DZ lo", color=color.new(dnDZ, 40), linewidth=1)
+pdDZhi = plot(valid ? dDZhi : na, "DN DZ hi", color=color.new(dnDZ, 40), linewidth=1)
+pdEZlo = plot(valid ? dEZlo : na, "DN EZ lo", color=color.new(dnEZ, 40), linewidth=1)
+pdEZhi = plot(valid ? dEZhi : na, "DN EZ hi", color=color.new(dnEZ, 40), linewidth=1)
+
+fill(pdGPlo, pdGPhi, color=color.new(dnGP, zAlpha), title="DN Golden Pocket")
+fill(pdDZlo, pdDZhi, color=color.new(dnDZ, zAlpha), title="DN Decision Zone")
+fill(pdEZlo, pdEZhi, color=color.new(dnEZ, zAlpha), title="DN Extreme Zone")
+
+// ─── REFERENCE LEVELS ───────────────────────────────────────────────────────
+
+plot(valid ? u000 : na, "UP 0%",   color=color.new(color.yellow, 50),   linewidth=2)
+plot(valid ? u100 : na, "UP 100%", color=color.new(color.yellow, 50), linewidth=2)
+
+plot(showAll and valid ? u236 : na, "UP 23.6%",  color=color.new(color.gray, 65),   linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? u382 : na, "UP 38.2%",  color=color.new(color.teal, 55),   linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? u786 : na, "UP 78.6%",  color=color.new(color.teal, 55),   linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? u127 : na, "UP 127.2%", color=color.new(color.orange, 55), linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? u162 : na, "UP 161.8%", color=color.new(color.orange, 45), linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? u200 : na, "UP 200%",   color=color.new(color.red, 50),    linewidth=1, style=plot.style_cross)
+
+plot(showAll and valid ? d236 : na, "DN 23.6%",  color=color.new(color.gray, 65),   linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? d382 : na, "DN 38.2%",  color=color.new(color.teal, 55),   linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? d786 : na, "DN 78.6%",  color=color.new(color.teal, 55),   linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? d127 : na, "DN 127.2%", color=color.new(color.orange, 55), linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? d162 : na, "DN 161.8%", color=color.new(color.orange, 45), linewidth=1, style=plot.style_cross)
+plot(showAll and valid ? d200 : na, "DN 200%",   color=color.new(color.red, 50),    linewidth=1, style=plot.style_cross)
+
+// ─── PRICE-IN-ZONE HIGHLIGHT ────────────────────────────────────────────────
+
+inUGP = valid and close >= math.min(uGPlo, uGPhi) and close <= math.max(uGPlo, uGPhi)
+inUDZ = valid and close >= math.min(uDZlo, uDZhi) and close <= math.max(uDZlo, uDZhi)
+inUEZ = valid and close >= math.min(uEZlo, uEZhi) and close <= math.max(uEZlo, uEZhi)
+inDGP = valid and close >= math.min(dGPhi, dGPlo) and close <= math.max(dGPhi, dGPlo)
+inDDZ = valid and close >= math.min(dDZhi, dDZlo) and close <= math.max(dDZhi, dDZlo)
+inDEZ = valid and close >= math.min(dEZhi, dEZlo) and close <= math.max(dEZhi, dEZlo)
+
+bgcolor(inUGP ? color.new(upGP, 93) : inDGP ? color.new(dnGP, 93) : na, title="In GP")
+bgcolor(inUDZ ? color.new(upDZ, 93) : inDDZ ? color.new(dnDZ, 93) : na, title="In DZ")
+bgcolor(inUEZ ? color.new(upEZ, 93) : inDEZ ? color.new(dnEZ, 93) : na, title="In EZ")
+
+// ─── ZONE LABELS (right edge) ──────────────────────────────────────────────
+
+var label lbl_uGP = na
+var label lbl_uDZ = na
+var label lbl_uEZ = na
+var label lbl_dGP = na
+var label lbl_dDZ = na
+var label lbl_dEZ = na
+
+if barstate.islast and valid
+    label.delete(lbl_uGP)
+    label.delete(lbl_uDZ)
+    label.delete(lbl_uEZ)
+    label.delete(lbl_dGP)
+    label.delete(lbl_dDZ)
+    label.delete(lbl_dEZ)
+    lbl_uGP := label.new(bar_index + 3, uGPhi, "▲ GP  " + str.tostring(uGPlo, "#.##") + " – " + str.tostring(uGPhi, "#.##"), style=label.style_label_left, color=color.new(upGP, 40), textcolor=color.white, size=size.small)
+    lbl_uDZ := label.new(bar_index + 3, uDZlo, "▲ DZ  " + str.tostring(uDZlo, "#.##") + " – " + str.tostring(uDZhi, "#.##"), style=label.style_label_left, color=color.new(upDZ, 40), textcolor=color.white, size=size.small)
+    lbl_uEZ := label.new(bar_index + 3, uEZlo, "▲ EZ  " + str.tostring(uEZlo, "#.##") + " – " + str.tostring(uEZhi, "#.##"), style=label.style_label_left, color=color.new(upEZ, 40), textcolor=color.black, size=size.small)
+    lbl_dGP := label.new(bar_index + 3, dGPhi, "▼ GP  " + str.tostring(dGPhi, "#.##") + " – " + str.tostring(dGPlo, "#.##"), style=label.style_label_left, color=color.new(dnGP, 40), textcolor=color.white, size=size.small)
+    lbl_dDZ := label.new(bar_index + 3, dDZlo, "▼ DZ  " + str.tostring(dDZhi, "#.##") + " – " + str.tostring(dDZlo, "#.##"), style=label.style_label_left, color=color.new(dnDZ, 40), textcolor=color.white, size=size.small)
+    lbl_dEZ := label.new(bar_index + 3, dEZlo, "▼ EZ  " + str.tostring(dEZhi, "#.##") + " – " + str.tostring(dEZlo, "#.##"), style=label.style_label_left, color=color.new(dnEZ, 40), textcolor=color.black, size=size.small)
+
+// ─── LEVEL TABLE ────────────────────────────────────────────────────────────
+
+var table tb = table.new(position.top_right, 5, 10, border_width=1, frame_color=color.new(color.gray, 50), frame_width=1)
+
+if showDash and barstate.islast and valid
+    table.cell(tb, 0, 0, "Zone",    bgcolor=color.new(color.black, 50), text_color=color.white,  text_size=size.tiny)
+    table.cell(tb, 1, 0, "▲ UP Lo", bgcolor=color.new(upGP, 60),        text_color=color.white,  text_size=size.tiny)
+    table.cell(tb, 2, 0, "▲ UP Hi", bgcolor=color.new(upGP, 60),        text_color=color.white,  text_size=size.tiny)
+    table.cell(tb, 3, 0, "▼ DN Hi", bgcolor=color.new(dnGP, 60),        text_color=color.white,  text_size=size.tiny)
+    table.cell(tb, 4, 0, "▼ DN Lo", bgcolor=color.new(dnGP, 60),        text_color=color.white,  text_size=size.tiny)
+
+    table.cell(tb, 0, 1, "Extreme",   bgcolor=color.new(color.black, 70), text_color=color.silver, text_size=size.tiny)
+    table.cell(tb, 1, 1, str.tostring(uEZlo, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(upEZ, 0), text_size=size.tiny)
+    table.cell(tb, 2, 1, str.tostring(uEZhi, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(upEZ, 0), text_size=size.tiny)
+    table.cell(tb, 3, 1, str.tostring(dEZhi, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(dnEZ, 0), text_size=size.tiny)
+    table.cell(tb, 4, 1, str.tostring(dEZlo, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(dnEZ, 0), text_size=size.tiny)
+
+    table.cell(tb, 0, 2, "Decision",  bgcolor=color.new(color.black, 70), text_color=color.silver, text_size=size.tiny)
+    table.cell(tb, 1, 2, str.tostring(uDZlo, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(upDZ, 0), text_size=size.tiny)
+    table.cell(tb, 2, 2, str.tostring(uDZhi, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(upDZ, 0), text_size=size.tiny)
+    table.cell(tb, 3, 2, str.tostring(dDZhi, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(dnDZ, 0), text_size=size.tiny)
+    table.cell(tb, 4, 2, str.tostring(dDZlo, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(dnDZ, 0), text_size=size.tiny)
+
+    table.cell(tb, 0, 3, "Golden P",  bgcolor=color.new(color.black, 70), text_color=color.silver, text_size=size.tiny)
+    table.cell(tb, 1, 3, str.tostring(uGPlo, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(upGP, 0), text_size=size.tiny)
+    table.cell(tb, 2, 3, str.tostring(uGPhi, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(upGP, 0), text_size=size.tiny)
+    table.cell(tb, 3, 3, str.tostring(dGPhi, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(dnGP, 0), text_size=size.tiny)
+    table.cell(tb, 4, 3, str.tostring(dGPlo, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.new(dnGP, 0), text_size=size.tiny)
+
+    table.cell(tb, 0, 4, "100%",      bgcolor=color.new(color.black, 70), text_color=color.silver, text_size=size.tiny)
+    table.cell(tb, 1, 4, str.tostring(u100, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.yellow, text_size=size.tiny)
+    table.cell(tb, 2, 4, "",          bgcolor=color.new(color.black, 80), text_size=size.tiny)
+    table.cell(tb, 3, 4, str.tostring(d100, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.yellow, text_size=size.tiny)
+    table.cell(tb, 4, 4, "",          bgcolor=color.new(color.black, 80), text_size=size.tiny)
+
+    table.cell(tb, 0, 5, "0%",        bgcolor=color.new(color.black, 70), text_color=color.silver, text_size=size.tiny)
+    table.cell(tb, 1, 5, str.tostring(u000, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.gray, text_size=size.tiny)
+    table.cell(tb, 2, 5, "",          bgcolor=color.new(color.black, 80), text_size=size.tiny)
+    table.cell(tb, 3, 5, str.tostring(d000, "#.##"), bgcolor=color.new(color.black, 80), text_color=color.gray, text_size=size.tiny)
+    table.cell(tb, 4, 5, "",          bgcolor=color.new(color.black, 80), text_size=size.tiny)
+
+    nearTxt = inUGP ? "▲ GOLDEN POCKET" : inUDZ ? "▲ DECISION ZONE" : inUEZ ? "▲ EXTREME ZONE" : inDGP ? "▼ GOLDEN POCKET" : inDDZ ? "▼ DECISION ZONE" : inDEZ ? "▼ EXTREME ZONE" : "—"
+    nearCol = inUGP or inUDZ or inUEZ ? color.new(upGP, 0) : inDGP or inDDZ or inDEZ ? color.new(dnGP, 0) : color.new(color.gray, 40)
+    table.cell(tb, 0, 6, "Price in:", bgcolor=color.new(color.black, 80), text_color=color.silver, text_size=size.tiny)
+    table.cell(tb, 1, 6, nearTxt,    bgcolor=color.new(color.black, 70), text_color=nearCol, text_size=size.tiny)
+    table.cell(tb, 2, 6, "",         bgcolor=color.new(color.black, 80), text_size=size.tiny)
+    table.cell(tb, 3, 6, str.tostring(rng, "#.##") + " pts", bgcolor=color.new(color.black, 80), text_color=color.silver, text_size=size.tiny)
+    table.cell(tb, 4, 6, "",         bgcolor=color.new(color.black, 80), text_size=size.tiny)

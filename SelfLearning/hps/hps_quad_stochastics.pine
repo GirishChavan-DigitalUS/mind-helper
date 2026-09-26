@@ -1,0 +1,165 @@
+//@version=6
+// =============================================================================
+//  HPS Quad Stochastics  [9-3 / 14-3 / 40-4 / 60-10]
+//  Companion oscillator panel for the "Anatomy of a HPS Trade" system
+//  (Futures Trade Alert Network). Plots the four stacked stochastics used by
+//  the Quad Divergence, 20/20 Bull Flag and Quad Super Signal setups.
+//
+//  DESIGN NOTES
+//  ------------
+//  * Four stochastics, matching the source charts:
+//      k1  = FastStoch(9,3)    -> "9-3"  fast trigger        (red)
+//      k2  = FastStoch(14,3)   -> second band                (green)
+//      k3  = FastStoch(40,4)   -> third band                 (cyan)
+//      k60 = FullStoch(60,10,1)-> "60-10" trend strength/KEY (white)
+//  * "Quad zones": background shading when ALL FOUR are < OS (quad oversold)
+//    or > OB (quad overbought) -> Stage-1 condition of the divergence setup.
+//  * Strict pivot divergence on the 9-3 line (ta.pivotlow / ta.pivothigh):
+//    bullish = price pivot low equal/lower while 9-3 pivot low is higher.
+//  * Nothing here repaints: every comparison uses closed-bar / historical data
+//    and pivots are confirmed after `pivotRight` bars.
+//  * Add this to a SEPARATE pane; pair it with "HPS Quad Pro" on the price
+//    chart for the entry/exit signals.
+// =============================================================================
+indicator("HPS Quad Stochastics [9-3/14-3/40-4/60-10]", shorttitle="HPS Quad Stoch", overlay=false, max_labels_count=500, max_lines_count=100)
+
+// ============================ INPUTS =========================================
+grpS = "Stochastics"
+len1   = input.int(9,  "9-3  %K Length",  minval = 1, group = grpS, inline = "s1")
+sm1    = input.int(3,  "Smooth",          minval = 1, group = grpS, inline = "s1")
+len2   = input.int(14, "14-3 %K Length",  minval = 1, group = grpS, inline = "s2")
+sm2    = input.int(3,  "Smooth",          minval = 1, group = grpS, inline = "s2")
+len3   = input.int(40, "40-4 %K Length",  minval = 1, group = grpS, inline = "s3")
+sm3    = input.int(4,  "Smooth",          minval = 1, group = grpS, inline = "s3")
+len60  = input.int(60, "60-10 %K Length", minval = 1, group = grpS, inline = "s4")
+sm60   = input.int(10, "Smooth K",        minval = 1, group = grpS, inline = "s4")
+sm60d  = input.int(1,  "Smooth D",        minval = 1, group = grpS, inline = "s4")
+
+grpL = "Levels"
+obLvl   = input.int(80, "Overbought", minval = 50, maxval = 100, group = grpL)
+osLvl   = input.int(20, "Oversold",   minval = 0,  maxval = 50,  group = grpL)
+midLvl  = input.int(50, "Midline",    minval = 0,  maxval = 100, group = grpL)
+strongLvl = input.int(85, "Trend-Strength Guide (60-10)", minval = 50, maxval = 100, group = grpL)
+
+grpC = "Colors"
+col1  = input.color(color.red,    "9-3",   group = grpC)
+col2  = input.color(color.green,  "14-3",  group = grpC)
+col3  = input.color(color.aqua,   "40-4",  group = grpC)
+col60 = input.color(color.white,  "60-10", group = grpC)
+
+grpZ = "Quad Zones & Divergence"
+showQuadZones = input.bool(true, "Shade Quad Overbought / Oversold", group = grpZ)
+quadOsCol = input.color(color.new(color.green, 80), "Quad Oversold Shade", group = grpZ)
+quadObCol = input.color(color.new(color.red, 80),   "Quad Overbought Shade", group = grpZ)
+showDiv    = input.bool(true, "Mark 9-3 Pivot Divergence", group = grpZ)
+pivotLeft  = input.int(5, "Divergence Pivot Left",  minval = 1, group = grpZ)
+pivotRight = input.int(3, "Divergence Pivot Right", minval = 1, group = grpZ)
+bullDivCol = input.color(color.lime,   "Bullish Divergence", group = grpZ)
+bearDivCol = input.color(color.fuchsia,"Bearish Divergence", group = grpZ)
+
+// ============================ STOCHASTIC CALC ================================
+// Fast stochastic  = SMA(raw %K, smoothK)
+// Full stochastic  = SMA( SMA(raw %K, smoothK), smoothD )
+f_fastStoch(int len, int smoothK) =>
+    ta.sma(ta.stoch(close, high, low, len), smoothK)
+
+f_fullStoch(int len, int smoothK, int smoothD) =>
+    fullK = ta.sma(ta.stoch(close, high, low, len), smoothK)
+    ta.sma(fullK, smoothD)
+
+k1  = f_fastStoch(len1, sm1)     // 9-3
+k2  = f_fastStoch(len2, sm2)     // 14-3
+k3  = f_fastStoch(len3, sm3)     // 40-4
+k60 = f_fullStoch(len60, sm60, sm60d)   // 60-10
+
+// ============================ QUAD ZONES =====================================
+quadOversold   = k1 < osLvl and k2 < osLvl and k3 < osLvl and k60 < osLvl
+quadOverbought = k1 > obLvl and k2 > obLvl and k3 > obLvl and k60 > obLvl
+
+bgcolor(showQuadZones and quadOversold   ? quadOsCol : na, title = "Quad Oversold")
+bgcolor(showQuadZones and quadOverbought ? quadObCol : na, title = "Quad Overbought")
+
+// ============================ PLOTS ==========================================
+plot(k1,  "9-3",   color = col1,  linewidth = 2)
+plot(k2,  "14-3",  color = col2,  linewidth = 1)
+plot(k3,  "40-4",  color = col3,  linewidth = 1)
+plot(k60, "60-10", color = col60, linewidth = 2)
+
+hline(obLvl,     "Overbought", color = color.new(color.gray, 40), linestyle = hline.style_dashed)
+hline(midLvl,    "Midline",    color = color.new(color.gray, 70), linestyle = hline.style_dotted)
+hline(osLvl,     "Oversold",   color = color.new(color.gray, 40), linestyle = hline.style_dashed)
+hline(strongLvl, "Strength",   color = color.new(color.orange, 40), linestyle = hline.style_dotted)
+
+// ============================ 9-3 PIVOT DIVERGENCE ===========================
+// Strict divergence using confirmed pivots on the 9-3 stochastic, correlated
+// with price pivots at the same bar. A pivot is confirmed `pivotRight` bars
+// after it prints, so these labels never repaint.
+pl    = ta.pivotlow(k1, pivotLeft, pivotRight)
+ph    = ta.pivothigh(k1, pivotLeft, pivotRight)
+
+var float prevPLval  = na      // previous 9-3 pivot low value
+var float prevPLprice= na      // price low at that pivot
+var float prevPHval  = na      // previous 9-3 pivot high value
+var float prevPHprice= na      // price high at that pivot
+
+// bar where the pivot actually occurred (pivotRight bars back)
+pivPrice(bool isLow) => isLow ? low[pivotRight] : high[pivotRight]
+
+bullDiv = false
+bearDiv = false
+
+if not na(pl)
+    curVal   = pl
+    curPrice = pivPrice(true)
+    // Bullish divergence: price equal/lower low, 9-3 higher low
+    if not na(prevPLval) and curPrice <= prevPLprice and curVal > prevPLval
+        bullDiv := true
+    prevPLval   := curVal
+    prevPLprice := curPrice
+
+if not na(ph)
+    curVal   = ph
+    curPrice = pivPrice(false)
+    // Bearish divergence: price equal/higher high, 9-3 lower high
+    if not na(prevPHval) and curPrice >= prevPHprice and curVal < prevPHval
+        bearDiv := true
+    prevPHval   := curVal
+    prevPHprice := curPrice
+
+// plot markers at the pivot bar (offset back by pivotRight)
+plotshape(showDiv and bullDiv, "Bullish 9-3 Divergence", style = shape.triangleup, location = location.bottom, color = bullDivCol, size = size.tiny, offset = -pivotRight, text = "Div")
+plotshape(showDiv and bearDiv, "Bearish 9-3 Divergence", style = shape.triangledown, location = location.top, color = bearDivCol, size = size.tiny, offset = -pivotRight, text = "Div")
+
+// ============================ ALERTS =========================================
+alertcondition(bullDiv, "9-3 Bullish Divergence", "HPS 9-3 bullish divergence on {{ticker}}")
+alertcondition(bearDiv, "9-3 Bearish Divergence", "HPS 9-3 bearish divergence on {{ticker}}")
+alertcondition(quadOversold,   "Quad Oversold",   "All 4 stochastics oversold on {{ticker}}")
+alertcondition(quadOverbought, "Quad Overbought", "All 4 stochastics overbought on {{ticker}}")
+
+// ============================ VALUE TABLE ====================================
+grpT = "Panel Table"
+showTbl = input.bool(true, "Show Values Table", group = grpT)
+f_stCol(float v) => v >= obLvl ? color.red : v <= osLvl ? color.green : color.gray
+
+// Horizontal layout: one header row + one value row. Light value-cell
+// background keeps the numbers readable against any chart theme.
+hdrBg = color.new(color.gray, 15)
+valBg = color.new(color.silver, 80)
+
+var table t = na
+if showTbl and barstate.islast
+    if not na(t)
+        table.delete(t)
+    t := table.new(position.top_right, 5, 2, border_width = 1, frame_color = color.gray, frame_width = 1)
+    // headers
+    table.cell(t, 0, 0, "9-3",   text_color = col1,        bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 0, "14-3",  text_color = col2,        bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 2, 0, "40-4",  text_color = col3,        bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 3, 0, "60-10", text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 4, 0, "Quad",  text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    // values
+    table.cell(t, 0, 1, str.tostring(k1,  "#.0"), text_color = f_stCol(k1), bgcolor = valBg, text_size = size.small)
+    table.cell(t, 1, 1, str.tostring(k2,  "#.0"), text_color = f_stCol(k2), bgcolor = valBg, text_size = size.small)
+    table.cell(t, 2, 1, str.tostring(k3,  "#.0"), text_color = f_stCol(k3), bgcolor = valBg, text_size = size.small)
+    table.cell(t, 3, 1, str.tostring(k60, "#.0"), text_color = k60 >= strongLvl ? color.green : k60 <= (100 - strongLvl) ? color.red : color.gray, bgcolor = valBg, text_size = size.small)
+    table.cell(t, 4, 1, quadOversold ? "OS" : quadOverbought ? "OB" : "-", text_color = color.white, bgcolor = quadOversold ? color.new(color.green, 0) : quadOverbought ? color.new(color.red, 0) : color.new(color.gray, 20), text_size = size.small)

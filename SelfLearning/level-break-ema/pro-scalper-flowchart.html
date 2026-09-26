@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pro Scalper v3.7 — Signal / Exit / Stop Logic</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #161b22;
+    --panel2: #1c2330;
+    --border: #2d3542;
+    --text: #e6edf3;
+    --muted: #9aa7b4;
+    --green: #2ea043;
+    --red: #f85149;
+    --amber: #d29922;
+    --blue: #388bfd;
+    --purple: #a371f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    padding: 28px 32px;
+    background: linear-gradient(135deg, #161b22, #0e1117);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0 0 6px; font-size: 24px; }
+  header p { margin: 0; color: var(--muted); font-size: 14px; max-width: 900px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 32px 80px; }
+  section { margin-top: 40px; }
+  h2 {
+    font-size: 19px;
+    border-left: 4px solid var(--blue);
+    padding-left: 12px;
+    margin-bottom: 4px;
+  }
+  h2.entry { border-color: var(--green); }
+  h2.exit  { border-color: var(--red); }
+  h2.stop  { border-color: var(--amber); }
+  h2.zone  { border-color: var(--purple); }
+  .lead { color: var(--muted); font-size: 14px; margin: 6px 0 18px; }
+  .diagram {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    overflow-x: auto;
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 16px; }
+  .card {
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .card p { margin: 0; font-size: 13px; color: var(--muted); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  code {
+    background: #0b0f14;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 12.5px;
+    color: #d2a8ff;
+  }
+  table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; background: var(--panel2); }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 20px; font-weight: 600; white-space: nowrap; }
+  .pill.g { background: rgba(46,160,67,.18); color: #56d364; }
+  .pill.r { background: rgba(248,81,73,.18); color: #ff7b72; }
+  .pill.a { background: rgba(210,153,34,.18); color: #e3b341; }
+  .note {
+    margin-top: 22px;
+    background: rgba(56,139,253,.08);
+    border: 1px solid rgba(56,139,253,.3);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 13px;
+    color: #c9d6e3;
+  }
+  .disclaimer { margin-top: 30px; font-size: 12px; color: #6e7681; border-top: 1px solid var(--border); padding-top: 16px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pro Scalper Approximation v3.7 — How to Read Signals, Exits &amp; Stops</h1>
+  <p>A visual breakdown of the strategy's logic: a <strong>Kalman-filtered SuperTrend</strong> engine that generates BUY/SELL signals, an <strong>ADX Volatility Wave</strong> zone model used as an exit reference, and a layered <strong>ATR bracket</strong> exit system with breakeven, zone-touch, and time stops.</p>
+</header>
+
+<div class="wrap">
+
+  <!-- OVERVIEW -->
+  <section>
+    <h2>1 · End-to-End Overview</h2>
+    <p class="lead">Each bar closes → the engine recomputes the trend state and wave zones → a signal may fire → position is managed by four independent exit conditions until one triggers.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart LR
+    A[Bar closes<br/>non-repainting] --> B[Kalman filter<br/>smooths price]
+    B --> C[Custom SuperTrend<br/>bands + trend state]
+    A --> D[ADX Volatility<br/>Wave zones]
+    C --> E{Trend<br/>flip?}
+    E -- "flip up" --> F([BUY signal])
+    E -- "flip down" --> G([SELL signal])
+    E -- "no flip" --> H[Hold / manage]
+    F --> I[Open LONG]
+    G --> J[Open SHORT]
+    I --> K[Exit manager]
+    J --> K
+    D --> K
+    K --> L([Position closed])
+
+    classDef sig fill:#132a17,stroke:#2ea043,color:#e6edf3;
+    classDef ex fill:#2a1414,stroke:#f85149,color:#e6edf3;
+    class F,G sig;
+    class L ex;
+      </pre>
+    </div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--green)"></span> Entry logic</span>
+      <span><span class="dot" style="background:var(--red)"></span> Exit logic</span>
+      <span><span class="dot" style="background:var(--purple)"></span> Wave zones (reference)</span>
+      <span><span class="dot" style="background:var(--blue)"></span> Core computation</span>
+    </div>
+  </section>
+
+  <!-- SIGNALS -->
+  <section>
+    <h2 class="entry">2 · Entry Signals (BUY / SELL)</h2>
+    <p class="lead">Signals come <em>only</em> from a SuperTrend <strong>trend-state flip</strong>. Being overbought/oversold does <strong>not</strong> create an entry — those wave zones are for exits only.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    S[Bar close price] --> KF{Use Kalman?}
+    KF -- Yes --> K1["kfEstimate = Kalman-smoothed price<br/>(basis = kfEstimate)"]
+    KF -- No --> K2["basis = hl2<br/>(A/B fallback)"]
+    K1 --> BND
+    K2 --> BND
+    BND["upBand = basis − factor×ATR<br/>dnBand = basis + factor×ATR"] --> TS{Evaluate<br/>trend state}
+    TS -- "close &gt; dnBand[1]<br/>while state was DOWN" --> UP["trendState = +1<br/>(Uptrend)"]
+    TS -- "close &lt; upBand[1]<br/>while state was UP" --> DN["trendState = −1<br/>(Downtrend)"]
+    UP --> FL{"Flip vs<br/>prior bar?"}
+    DN --> FL
+    FL -- "−1 → +1" --> SESSL{In RTH<br/>session?}
+    FL -- "+1 → −1" --> SESSS{In RTH<br/>session?}
+    FL -- "no change" --> HOLD[No new signal]
+    SESSL -- Yes --> BUY(["BUY ▲<br/>green triangle below bar<br/>strategy.entry Long"])
+    SESSS -- Yes --> SELL(["SELL ▼<br/>red triangle above bar<br/>strategy.entry Short"])
+    SESSL -- No --> BLK[Blocked: outside 0930–1600]
+    SESSS -- No --> BLK
+
+    classDef buy fill:#132a17,stroke:#2ea043,color:#e6edf3;
+    classDef sell fill:#2a1414,stroke:#f85149,color:#e6edf3;
+    class BUY buy;
+    class SELL sell;
+      </pre>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <h3><span class="dot" style="background:var(--blue)"></span> Kalman filter</h3>
+        <p>Smooths raw <code>close</code> with process noise <code>Q=0.01</code> and measurement noise <code>R=0.2</code>. Feeds the smoothed estimate into the trend bands so flips are cleaner than raw-price SuperTrend.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background:var(--blue)"></span> SuperTrend core</h3>
+        <p>Hand-built band recurrence with <code>ATR period = 7</code>, <code>factor = 2.0</code>. Trend state is <code>+1</code> (long bias) or <code>−1</code> (short bias); the plotted band follows the active side.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background:var(--green)"></span> The actual trigger</h3>
+        <p><code>flippedLong</code> / <code>flippedShort</code> — the state must <em>change</em> this bar. One signal per flip, and they strictly alternate BUY → SELL → BUY.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background:var(--amber)"></span> Session gate</h3>
+        <p>Only fires during <code>0930–1600</code>. The trend keeps computing overnight, but flips outside RTH are suppressed (options aren't tradable then).</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- EXITS -->
+  <section>
+    <h2 class="exit">3 · Exit Logic — Four Independent Conditions</h2>
+    <p class="lead">Once a position is open, <strong>whichever of these fires first</strong> closes the trade. They run every bar in parallel.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    P[Position OPEN] --> C1{Hard STOP hit?}
+    C1 -- Yes --> X1(["Stop-loss exit<br/>entry ∓ 1.5×ATR<br/>(or breakeven if moved)"])
+    C1 -- No --> C2{TARGET hit?}
+    C2 -- Yes --> X2(["Profit-target exit<br/>entry ± 2.0×ATR"])
+    C2 -- No --> C3{"Opposite WAVE<br/>zone touched?"}
+    C3 -- Yes --> X3(["Zone exit<br/>OB Zone Exit / OS Zone Exit"])
+    C3 -- No --> C4{"Held ≥ 12 bars?"}
+    C4 -- Yes --> X4(["Time stop<br/>close_all"])
+    C4 -- No --> P
+
+    classDef ex fill:#2a1414,stroke:#f85149,color:#e6edf3;
+    class X1,X2,X3,X4 ex;
+      </pre>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Exit</th><th>Type</th><th>Trigger</th><th>Purpose</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Stop-loss</td><td><span class="pill r">Protective</span></td>
+          <td>Price hits <code>entry − 1.5×ATR</code> (long) / <code>entry + 1.5×ATR</code> (short). ATR is <em>frozen at entry</em>.</td>
+          <td>Caps the loss on a failed flip.</td>
+        </tr>
+        <tr>
+          <td>Profit target</td><td><span class="pill g">Take profit</span></td>
+          <td>Price hits <code>entry ± 2.0×ATR</code>. Gives a fixed <strong>2:1.5 reward:risk</strong> bracket.</td>
+          <td>Books the win without waiting for the opposite flip.</td>
+        </tr>
+        <tr>
+          <td>Zone-touch exit</td><td><span class="pill a">Reference</span></td>
+          <td>Long closes when price tags the <strong>upper</strong> wave outer edge (overbought); short closes at the <strong>lower</strong> edge (oversold). Toggle: <code>useZoneExit</code>.</td>
+          <td>Exit into exhaustion, mimicking Pro Scalper's TP zones.</td>
+        </tr>
+        <tr>
+          <td>Time stop</td><td><span class="pill a">Housekeeping</span></td>
+          <td>Neither stop nor target hit within <code>maxBarsInTrade = 12</code> bars → <code>close_all</code>. Toggle: <code>useTimeStop</code>.</td>
+          <td>Frees capital from stalled, going-nowhere trades.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- STOPS / BREAKEVEN -->
+  <section>
+    <h2 class="stop">4 · Stop Management &amp; Breakeven ("Trailing")</h2>
+    <p class="lead">Important: this is <strong>not a continuous trailing stop</strong>. It's a <strong>one-time breakeven jump</strong> — once you're far enough in profit, the stop snaps from its ATR distance up to the entry price and stays there.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    E[Trade opens] --> INIT["Stop = entry ∓ 1.5×ATR<br/>beTriggered = false"]
+    INIT --> W{"Favorable move<br/>≥ 1.0×ATR?"}
+    W -- No --> W
+    W -- "Yes (long: high ≥ entry+1×ATR)<br/>(short: low ≤ entry−1×ATR)" --> BE["beTriggered = true<br/>Stop JUMPS to entry price"]
+    BE --> LOCK["Stop stays at breakeven<br/>(does NOT keep trailing)"]
+    LOCK --> DONE{"Stop or target<br/>eventually hit"}
+    DONE --> OUT([Position closed])
+
+    classDef be fill:#2a2411,stroke:#d29922,color:#e6edf3;
+    class BE,LOCK be;
+      </pre>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <h3><span class="dot" style="background:var(--amber)"></span> Trigger distance</h3>
+        <p><code>breakevenAtrMult = 1.0</code> — after price moves 1×ATR in your favor, downside risk on that trade becomes ~zero (minus slippage/commission).</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background:var(--amber)"></span> Where it lands</h3>
+        <p>Stop moves exactly to <code>entryPrice</code>. It never advances further, so remaining upside runs to the fixed <code>2.0×ATR</code> target or a wave/time exit.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background:var(--red)"></span> One-shot flag</h3>
+        <p><code>beTriggered</code> latches <code>true</code> for the life of the trade and resets only on the next entry. No re-trailing on pullbacks.</p>
+      </div>
+    </div>
+    <div class="note">
+      <strong>How to read it on the chart:</strong> the grey line is your <code>Entry Price</code>, the red line is the live <code>Stop Loss</code> (you'll see it snap up to the grey entry line the moment breakeven triggers), and the green line is the fixed <code>Take Profit</code>. On-open labels <span class="pill r">SL</span> and <span class="pill g">TP</span> print the initial bracket values.
+    </div>
+  </section>
+
+  <!-- WAVE ZONES -->
+  <section>
+    <h2 class="zone">5 · ADX Volatility Wave Zones (Exit Reference Only)</h2>
+    <p class="lead">The red (upper) and green (lower) gradient ribbons are overbought/oversold zones. They feed the <em>zone-touch exit</em> and the visual <strong>TP</strong> markers — they never generate entries.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    EQ["Equilibrium = VWMA(close, 50)"] --> WID
+    BB["BB stdev × 1.5"] --> WID
+    ADX["ADX (len 14)"] --> WID
+    WID["width = BBstdev × (1 + 0.8×ADX/100)<br/>then RMA-smoothed"] --> OFF
+    OFF["Inner edge = eq ± 1.0×width<br/>Outer edge = eq ± 2.0×width"] --> ZONE
+    ZONE{Price vs<br/>outer edge} -- "≥ upper outer" --> OB["OVERBOUGHT<br/>→ closes a LONG"]
+    ZONE -- "≤ lower outer" --> OS["OVERSOLD<br/>→ closes a SHORT"]
+    ZONE -- "between" --> NEU["Neutral"]
+    OB --> TP1["TP marker (long):<br/>lower high while overbought"]
+    OS --> TP2["TP marker (short):<br/>higher low while oversold"]
+
+    classDef z fill:#1e1630,stroke:#a371f7,color:#e6edf3;
+    class OB,OS,NEU z;
+      </pre>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <h3><span class="dot" style="background:var(--purple)"></span> Gradient ribbon</h3>
+        <p>5 concentric fill layers per side; opacity rises toward the outer edge so "deeper into the zone" reads as more extreme.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background:var(--purple)"></span> Cooldown state</h3>
+        <p>A wave marks "active" once price closes past its outer edge, and won't re-fire until price sits in the neutral band for <code>5</code> bars — prevents repeated same-zone triggers.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" style="background:var(--amber)"></span> Compression</h3>
+        <p>Yellow background = wave width near its own recent low → a fresh volatility wave is "due". Reference only; not wired into entries or exits.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- QUICK REFERENCE -->
+  <section>
+    <h2>6 · Quick Reference — What Each Chart Mark Means</h2>
+    <table>
+      <thead><tr><th>On chart</th><th>Meaning</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill g">▲ Green triangle (below bar)</span></td><td>SuperTrend flipped up, in session</td><td>BUY / open long</td></tr>
+        <tr><td><span class="pill r">▼ Red triangle (above bar)</span></td><td>SuperTrend flipped down, in session</td><td>SELL / open short</td></tr>
+        <tr><td>Green/red SuperTrend band line</td><td>Active trend side &amp; direction</td><td>Trend context / trailing reference</td></tr>
+        <tr><td>Red / green gradient ribbons</td><td>Overbought / oversold wave zones</td><td>Exit reference, not entry</td></tr>
+        <tr><td><span class="pill a">Orange ✕ (TP marker)</span></td><td>Exhaustion inside a zone</td><td>Consider taking profit</td></tr>
+        <tr><td>Small circle (upper/lower)</td><td>Price entered a wave zone</td><td>Watch for reversal/exit</td></tr>
+        <tr><td>Grey / red / green level lines</td><td>Entry / stop / target of open trade</td><td>Live trade management</td></tr>
+        <tr><td>Yellow background</td><td>Volatility compression</td><td>New wave likely soon (info)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <div class="disclaimer">
+    This document describes an <strong>original approximation script</strong> (not a copy of any protected indicator) built for research/comparison. The entry engine is fit to 37 real RTH signals (≈89% match); the wave zones are a reconstruction from a public description and are not fit to real data. Strategy-Tester results are hypothetical and not indicative of future results. The position sizing models SPY <em>shares</em>, not option premium/delta/theta/gamma — use it to judge entry/exit <em>timing</em>, not options P&amp;L.
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    flowchart: { curve: 'basis', htmlLabels: true, useMaxWidth: true },
+    themeVariables: {
+      background: '#161b22',
+      primaryColor: '#1c2330',
+      primaryBorderColor: '#2d3542',
+      primaryTextColor: '#e6edf3',
+      lineColor: '#5a6472',
+      fontSize: '14px'
+    }
+  });
+</script>
+</body>
+</html>

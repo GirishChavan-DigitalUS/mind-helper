@@ -1,0 +1,457 @@
+//@version=6
+// =============================================================================
+//  Reclaim + Flag + 8 EMA Confluence  [8 / 21 / 50]
+//  A structure-first swing/day-trade assistant inspired by the TSLA "MASSIVE
+//  DAILY SUPPORT -> reclaim -> flag -> retest" setup.
+//
+//  THE IDEA (why this exists)
+//  --------------------------
+//  The 8 EMA alone is NOT an edge (trading its crossover = "superstition").
+//  The edge is CONFLUENCE, ranked by importance:
+//
+//    TIER 1  Structure (the thesis)   -> a key horizontal LEVEL + a RECLAIM
+//    TIER 2  Pattern   (the trigger)  -> a FLAG / range contraction that holds
+//    TIER 3  Momentum  (confirmation) -> price holding the 8 EMA
+//    FILTER  Overall trend            -> the 21 & 50 EMAs (regime + slope)
+//
+//  THE 21 / 50 "OVERALL TREND" FILTER
+//  ----------------------------------
+//  The 8 EMA is fast and noisy; it only tells you short-term momentum. To know
+//  the *overall trend* you use two slower EMAs and their slope:
+//
+//      Bull regime :  EMA21 > EMA50  AND  EMA50 sloping UP
+//      Bear regime :  EMA21 < EMA50  AND  EMA50 sloping DOWN
+//      No-Trade    :  EMAs tangled / 50 flat  (chop — stand aside)
+//
+//  Signals only fire WITH the regime (longs in a bull regime, shorts in a
+//  bear regime). This is the "trend filter" that keeps you from buying the 8
+//  EMA reclaim into a clean downtrend.
+//
+//  TIMEFRAME / HOLDING-PERIOD ALIGNMENT
+//  ------------------------------------
+//  On the DAILY chart the 8/21/50 EMAs = last 8 / 21 / 50 DAYS -> multi-day
+//  swing. On 15m they = last ~2h / ~5h / ~12.5h -> intraday. Match the chart
+//  timeframe to how long you actually hold. This tool works on any TF.
+//
+//  WHAT IT DOES
+//  ------------
+//  * Plots 8/21/50 EMAs, tinted by the 21/50 trend regime.
+//  * Lets you set a KEY LEVEL (support for longs / resistance for shorts) and
+//    auto-marks a RECLAIM close beyond it.
+//  * Detects a FLAG (range contraction) that holds above the reclaimed level.
+//  * Confirms with price holding the 8 EMA.
+//  * Fires a LONG/SHORT candidate ONLY when Tier1+Tier2+Tier3 agree AND the
+//    21/50 regime agrees.
+//  * Auto-plots suggested STOP and two TARGETS, and provides alerts.
+//  * Renders a confluence checklist dashboard.
+//
+//  This FLAGS qualified candidates — the underlying method is discretionary
+//  (level quality, market context). Treat signals as an assist, not autopilot.
+// =============================================================================
+indicator("Reclaim + Flag + 8 EMA Confluence [8/21/50]", shorttitle="Reclaim+Flag EMA", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================ INPUTS =========================================
+grpEMA = "EMAs"
+showFast = input.bool(true, "", group = grpEMA, inline = "e1")
+fastLen  = input.int(8,  "Fast EMA (momentum/confirmation)", minval = 1, group = grpEMA, inline = "e1")
+fastCol  = input.color(color.orange, "", group = grpEMA, inline = "e1")
+showMid  = input.bool(true, "", group = grpEMA, inline = "e2")
+midLen   = input.int(21, "Mid EMA (trend)",                  minval = 1, group = grpEMA, inline = "e2")
+midCol   = input.color(color.blue,   "", group = grpEMA, inline = "e2")
+showSlow = input.bool(true, "", group = grpEMA, inline = "e3")
+slowLen  = input.int(50, "Slow EMA (overall trend)",         minval = 1, group = grpEMA, inline = "e3")
+slowCol  = input.color(color.gray,   "", group = grpEMA, inline = "e3")
+showExtra = input.bool(false, "", group = grpEMA, inline = "e4")
+extraLen  = input.int(200, "Extra EMA (macro trend, optional)", minval = 1, group = grpEMA, inline = "e4")
+extraCol  = input.color(color.red,   "", group = grpEMA, inline = "e4")
+tintFast = input.bool(true, "Tint 8 EMA green/red by regime", group = grpEMA)
+
+grpTrend = "Overall Trend Filter (21 / 50)"
+slopeLen = input.int(3, "50 EMA slope lookback (bars)", minval = 1, group = grpTrend, tooltip = "How many bars back to measure the 50 EMA slope. Larger = slower/stricter regime.")
+requireSlope = input.bool(true, "Require 50 EMA slope to agree", group = grpTrend, tooltip = "Bull needs EMA50 rising, Bear needs EMA50 falling. Off = use only 21 vs 50 stack.")
+shadeRegime  = input.bool(true, "Shade background by regime", group = grpTrend)
+
+grpLvl = "Key Level (structure)"
+levelSource = input.string("Auto Pivots", "Structure level source", options = ["Auto Pivots", "Manual", "Prev Day (PDL/PDH)", "Pre-Market (PML/PMH)", "Session Open"], group = grpLvl, tooltip = "Where the reclaim level comes from. Longs reclaim the support side (PDL/PML/Open/pivot low); shorts reject the resistance side (PDH/PMH/Open/pivot high).")
+pivLen    = input.int(10, "Pivot lookback (left/right bars)", minval = 2, group = grpLvl, tooltip = "Only used when source = Auto Pivots.")
+manLong   = input.price(0.0, "Manual SUPPORT level (longs)", group = grpLvl, confirm = false, tooltip = "Only used when source = Manual. The support you expect price to reclaim & hold.")
+manShort  = input.price(0.0, "Manual RESISTANCE level (shorts)", group = grpLvl, confirm = false, tooltip = "Only used when source = Manual.")
+levelBufPct = input.float(0.1, "Reclaim buffer %", minval = 0.0, step = 0.05, group = grpLvl, tooltip = "Price must close this % beyond the level to count as a genuine reclaim (filters wick fakeouts).")
+
+grpFlag = "Flag / Consolidation"
+flagLen     = input.int(6, "Flag window (bars)", minval = 2, group = grpFlag, tooltip = "Number of bars used to measure the consolidation (flag) after the reclaim.")
+flagMaxPct  = input.float(4.0, "Max flag range %", minval = 0.1, step = 0.1, group = grpFlag, tooltip = "The high-low range of the flag window must be tighter than this % (a real flag is a tight coil, not a wide swing).")
+reclaimBars = input.int(15, "Reclaim must be within N bars", minval = 1, group = grpFlag, tooltip = "The reclaim has to be recent for the flag to still be valid.")
+poleLen     = input.int(5, "Pole length (bars)", minval = 1, group = grpFlag, tooltip = "Bars immediately BEFORE the flag that form the impulse 'pole'. A flag needs a strong pole first.")
+minPoleATR  = input.float(2.0, "Min pole strength (× ATR)", minval = 0.1, step = 0.1, group = grpFlag, tooltip = "The pole move must be at least this many ATRs. Bigger = only steep, high-quality poles qualify.")
+flagRetraceMax = input.float(0.5, "Max flag retrace (× pole)", minval = 0.1, step = 0.05, group = grpFlag, tooltip = "Flag height must be smaller than this fraction of the pole (≈0.5 = half the pole). A real flag retraces only part of the pole.")
+requireCounterSlope = input.bool(false, "Require flag to lean against trend", group = grpFlag, tooltip = "Strict: bull flag must drift DOWN/flat, bear flag must drift UP/flat. Off = allow a small slope tolerance.")
+flagSlopeTolPct = input.float(15.0, "Flag slope tolerance (% of ATR/bar)", minval = 0.0, step = 1.0, group = grpFlag, tooltip = "How much the flag may lean WITH the trend and still count (as a fraction of ATR per bar). Only used when 'Require counter-slope' is off.")
+atrLen      = input.int(14, "ATR length (pole/slope scale)", minval = 1, group = grpFlag)
+useVolFilter = input.bool(true, "Volume dry-up + breakout filter", group = grpFlag, tooltip = "Require volume to FADE inside the flag and SURGE on the breakout — the most reliable flag confirmation.")
+breakoutVolMult = input.float(1.3, "Breakout volume (× flag avg)", minval = 1.0, step = 0.1, group = grpFlag, tooltip = "Breakout bar volume must exceed the flag's average volume by this multiple.")
+drawFlags   = input.bool(true, "Draw pole + flag channel + label", group = grpFlag)
+
+grpRisk = "Risk / Targets"
+stopPad    = input.float(0.25, "Stop padding %", minval = 0.0, step = 0.05, group = grpRisk, tooltip = "Extra room below the flag low (long) / above the flag high (short) for the stop.")
+rr1        = input.float(1.5, "Target 1 (R multiple)", minval = 0.1, step = 0.1, group = grpRisk)
+rr2        = input.float(3.0, "Target 2 (R multiple)", minval = 0.1, step = 0.1, group = grpRisk)
+drawRisk   = input.bool(true, "Draw stop/target lines on signal", group = grpRisk)
+
+grpSig = "Signals"
+allowLongs  = input.bool(true,  "Allow LONG signals",  group = grpSig, inline = "s1")
+allowShorts = input.bool(true,  "Allow SHORT signals", group = grpSig, inline = "s1")
+onePerReclaim = input.bool(true, "One signal per reclaim event", group = grpSig, tooltip = "Prevents multiple entries off the same structure.")
+
+grpUI = "Dashboard"
+showTable = input.bool(true, "Show confluence dashboard", group = grpUI)
+tblPos    = input.string("Top Right", "Position", options = ["Top Right","Top Left","Bottom Right","Bottom Left"], group = grpUI)
+
+grpSess = "Session Levels (PMH/PML • PDH/PDL • Open)"
+sessTz   = input.string("America/New_York", "Session timezone", group = grpSess, tooltip = "Timezone used to build the pre-market window and the regular-session open. Best used on intraday charts.")
+pmSess   = input.session("0400-0930", "Pre-Market window", group = grpSess, tooltip = "Window used to build Pre-Market High/Low each day, then frozen for the session.")
+rthSess  = input.session("0930-1600", "Regular session", group = grpSess, tooltip = "Regular trading hours. The Open level = the open of the first RTH bar.")
+showPMH  = input.bool(true, "Pre-Market High (PMH)",  group = grpSess, inline = "sl1")
+showPML  = input.bool(true, "Pre-Market Low (PML)",   group = grpSess, inline = "sl2")
+showPDH  = input.bool(true, "Prev Day High (PDH)",    group = grpSess, inline = "sl3")
+showPDL  = input.bool(true, "Prev Day Low (PDL)",     group = grpSess, inline = "sl4")
+showOpen = input.bool(true, "Session Open price",     group = grpSess, inline = "sl5")
+pmhCol   = input.color(color.new(color.orange, 0), "", group = grpSess, inline = "sl1")
+pmlCol   = input.color(color.new(color.orange, 0), "", group = grpSess, inline = "sl2")
+pdhCol   = input.color(color.new(color.blue, 0),   "", group = grpSess, inline = "sl3")
+pdlCol   = input.color(color.new(color.blue, 0),   "", group = grpSess, inline = "sl4")
+openCol  = input.color(color.new(color.yellow, 0), "", group = grpSess, inline = "sl5")
+showLvlLabels = input.bool(true, "Label session levels", group = grpSess)
+
+// ============================ EMAs ===========================================
+emaFast = ta.ema(close, fastLen)
+emaMid  = ta.ema(close, midLen)
+emaSlow = ta.ema(close, slowLen)
+emaExtra = ta.ema(close, extraLen)
+
+// ---- Overall trend regime from 21 / 50 --------------------------------------
+slopeUp   = emaSlow > emaSlow[slopeLen]
+slopeDown = emaSlow < emaSlow[slopeLen]
+stackBull = emaMid > emaSlow
+stackBear = emaMid < emaSlow
+
+isBull = stackBull and (not requireSlope or slopeUp)
+isBear = stackBear and (not requireSlope or slopeDown)
+regime = isBull ? 1 : isBear ? -1 : 0
+regimeTxt = regime == 1 ? "BULL" : regime == -1 ? "BEAR" : "NO-TRADE"
+regimeCol = regime == 1 ? color.green : regime == -1 ? color.red : color.gray
+
+// ============================ SESSION LEVELS =================================
+// Previous Day High/Low — prior COMPLETED daily bar (non-repainting via [1]).
+[pdhRaw, pdlRaw] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+
+// Pre-Market High/Low — built live during the PM window, then frozen for the day.
+inPM  = not na(time(timeframe.period, pmSess, sessTz))
+newPM = inPM and not inPM[1]
+var float pmhVal = na
+var float pmlVal = na
+if newPM
+    pmhVal := high
+    pmlVal := low
+else if inPM
+    pmhVal := math.max(pmhVal, high)
+    pmlVal := math.min(pmlVal, low)
+
+// Session Open — the open of the first regular-session bar of the day.
+inRTH  = not na(time(timeframe.period, rthSess, sessTz))
+newRTH = inRTH and not inRTH[1]
+var float openVal = na
+if newRTH
+    openVal := open
+
+// Display-gated copies (become na when the toggle is off)
+pdh = showPDH ? pdhRaw : na
+pdl = showPDL ? pdlRaw : na
+pmh = showPMH ? pmhVal : na
+pml = showPML ? pmlVal : na
+sessOpen = showOpen ? openVal : na
+
+// ============================ KEY LEVEL ======================================
+// Auto pivots (confirmed, non-repainting once formed)
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low,  pivLen, pivLen)
+var float supLevel = na   // support (for longs)
+var float resLevel = na   // resistance (for shorts)
+if not na(pl)
+    supLevel := pl
+if not na(ph)
+    resLevel := ph
+
+// Resolve the structure level from the selected source.
+// Longs reclaim the SUPPORT side; shorts reject the RESISTANCE side.
+longLevel = switch levelSource
+    "Auto Pivots"          => supLevel
+    "Manual"               => manLong > 0 ? manLong : na
+    "Prev Day (PDL/PDH)"   => pdlRaw
+    "Pre-Market (PML/PMH)" => pmlVal
+    "Session Open"         => openVal
+    => na
+
+shortLevel = switch levelSource
+    "Auto Pivots"          => resLevel
+    "Manual"               => manShort > 0 ? manShort : na
+    "Prev Day (PDL/PDH)"   => pdhRaw
+    "Pre-Market (PML/PMH)" => pmhVal
+    "Session Open"         => openVal
+    => na
+
+// ============================ RECLAIM ========================================
+longBuf  = na(longLevel)  ? na : longLevel  * (1 + levelBufPct / 100.0)
+shortBuf = na(shortLevel) ? na : shortLevel * (1 - levelBufPct / 100.0)
+
+// A reclaim = crossing back above (long) / below (short) the buffered level.
+longReclaim  = not na(longBuf)  and ta.crossover(close, longBuf)
+shortReclaim = not na(shortBuf) and ta.crossunder(close, shortBuf)
+
+var int barsSinceLongReclaim  = na
+var int barsSinceShortReclaim = na
+barsSinceLongReclaim  := longReclaim  ? 0 : (na(barsSinceLongReclaim)  ? na : barsSinceLongReclaim  + 1)
+barsSinceShortReclaim := shortReclaim ? 0 : (na(barsSinceShortReclaim) ? na : barsSinceShortReclaim + 1)
+
+longReclaimActive  = not na(barsSinceLongReclaim)  and barsSinceLongReclaim  <= reclaimBars
+shortReclaimActive = not na(barsSinceShortReclaim) and barsSinceShortReclaim <= reclaimBars
+
+// ============================ FLAG (bull/bear classifier) ====================
+atr = ta.atr(atrLen)
+
+// --- Tightness (simple % cap on the consolidation range) ---------------------
+flagHigh = ta.highest(high, flagLen)
+flagLow  = ta.lowest(low,  flagLen)
+flagRange    = flagHigh - flagLow
+flagRangePct = flagRange / flagLow * 100.0
+isTight = flagRangePct <= flagMaxPct
+
+// --- The POLE: the impulse in the `poleLen` bars BEFORE the flag window -------
+poleStart = close[flagLen + poleLen]   // price at the start of the pole
+poleEnd   = close[flagLen]             // price at the end of the pole = flag start
+poleMove  = poleEnd - poleStart
+poleAbs   = math.abs(poleMove)
+poleStrengthATR = atr > 0 ? poleAbs / atr : 0.0
+strongPole = poleAbs >= minPoleATR * atr
+bullPole = poleMove > 0 and strongPole   // sharp rally
+bearPole = poleMove < 0 and strongPole   // sharp sell-off
+
+// --- Flag SLOPE (linear regression of the flag window) -----------------------
+// Positive slope = drifting up, negative = drifting down (per bar).
+fslope   = ta.linreg(close, flagLen, 0) - ta.linreg(close, flagLen, 1)
+slopeTol = flagSlopeTolPct / 100.0 * atr
+slopeOkBull = requireCounterSlope ? fslope <= 0 : fslope <= slopeTol   // down/flat (leans against up-trend)
+slopeOkBear = requireCounterSlope ? fslope >= 0 : fslope >= -slopeTol  // up/flat  (leans against down-trend)
+
+// --- Flag must retrace only PART of the pole ---------------------------------
+retraceOk = poleAbs > 0 and flagRange <= flagRetraceMax * poleAbs
+
+// --- Volume dry-up inside the flag vs the pole -------------------------------
+flagVol = ta.sma(volume, flagLen)
+poleVol = ta.sma(volume[flagLen], poleLen)
+volDryUp = flagVol < poleVol
+
+// --- Final classification ----------------------------------------------------
+bullFlag = bullPole and isTight and retraceOk and slopeOkBull and (not useVolFilter or volDryUp)
+bearFlag = bearPole and isTight and retraceOk and slopeOkBear and (not useVolFilter or volDryUp)
+flagTypeTxt = bullFlag ? "BULL FLAG" : bearFlag ? "BEAR FLAG" : "none"
+
+// The flag must hold above the reclaimed support (long) / below resistance (short)
+flagHoldsLong  = not na(longLevel)  and flagLow  >= longLevel  * (1 - levelBufPct / 100.0)
+flagHoldsShort = not na(shortLevel) and flagHigh <= shortLevel * (1 + levelBufPct / 100.0)
+
+// ============================ FLAG DRAWINGS ==================================
+var line  poleLn = na
+var line  topLn  = na
+var line  botLn  = na
+var label flagLbl = na
+
+bullFlagNew = bullFlag and not bullFlag[1]
+bearFlagNew = bearFlag and not bearFlag[1]
+
+if drawFlags and (bullFlagNew or bearFlagNew)
+    isB = bullFlagNew
+    if not na(poleLn)
+        line.delete(poleLn)
+    if not na(topLn)
+        line.delete(topLn)
+    if not na(botLn)
+        line.delete(botLn)
+    if not na(flagLbl)
+        label.delete(flagLbl)
+    xPoleStart = bar_index - (flagLen + poleLen)
+    xFlagStart = bar_index - flagLen
+    poleColL = isB ? color.new(color.green, 0) : color.new(color.red, 0)
+    poleLn := line.new(xPoleStart, poleStart, xFlagStart, poleEnd, color = poleColL, width = 3)
+    topLn  := line.new(xFlagStart, flagHigh, bar_index, flagHigh, color = color.new(color.gray, 0), width = 1, style = line.style_dashed)
+    botLn  := line.new(xFlagStart, flagLow,  bar_index, flagLow,  color = color.new(color.gray, 0), width = 1, style = line.style_dashed)
+    txt = (isB ? "BULL FLAG" : "BEAR FLAG") + "  (" + str.tostring(poleStrengthATR, "#.#") + "x ATR pole)"
+    flagLbl := isB ? label.new(xFlagStart, flagHigh, txt, style = label.style_label_down, color = color.new(color.green, 15), textcolor = color.white, size = size.small) : label.new(xFlagStart, flagLow, txt, style = label.style_label_up, color = color.new(color.red, 15), textcolor = color.white, size = size.small)
+
+// ============================ MOMENTUM (8 EMA) ===============================
+holdAboveFast = close > emaFast and emaFast >= emaFast[1]   // holding + 8 EMA rising
+holdBelowFast = close < emaFast and emaFast <= emaFast[1]   // holding + 8 EMA falling
+
+// ============================ CONFLUENCE ENTRY ===============================
+longSetup =  allowLongs  and isBull and longReclaimActive  and bullFlag and flagHoldsLong  and holdAboveFast
+shortSetup = allowShorts and isBear and shortReclaimActive and bearFlag and flagHoldsShort and holdBelowFast
+
+// Breakout volume confirmation (surge on the trigger bar)
+breakoutVolOk = not useVolFilter or volume > ta.sma(volume, flagLen) * breakoutVolMult
+
+// Trigger on the bar that breaks the flag in the trade direction
+longTrigger  = longSetup  and high > flagHigh[1] and breakoutVolOk
+shortTrigger = shortSetup and low  < flagLow[1]  and breakoutVolOk
+
+// One-per-reclaim gating
+// A stable id for the current reclaim event = the bar_index of the reclaim bar
+longReclaimBar  = longReclaimActive  ? bar_index - barsSinceLongReclaim  : na
+shortReclaimBar = shortReclaimActive ? bar_index - barsSinceShortReclaim : na
+
+var int firedLongOnBar  = na
+var int firedShortOnBar = na
+longFire  = longTrigger  and (not onePerReclaim or firedLongOnBar  != longReclaimBar)
+shortFire = shortTrigger and (not onePerReclaim or firedShortOnBar != shortReclaimBar)
+if longFire
+    firedLongOnBar := longReclaimBar
+if shortFire
+    firedShortOnBar := shortReclaimBar
+
+// ============================ RISK / TARGETS =================================
+var line   slLine = na
+var line   t1Line = na
+var line   t2Line = na
+var label  entLbl = na
+
+f_clearRisk() =>
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(t1Line)
+        line.delete(t1Line)
+    if not na(t2Line)
+        line.delete(t2Line)
+    if not na(entLbl)
+        label.delete(entLbl)
+
+if longFire and drawRisk
+    f_clearRisk()
+    entry = close
+    stop  = flagLow * (1 - stopPad / 100.0)
+    risk  = entry - stop
+    tgt1  = entry + risk * rr1
+    tgt2  = entry + risk * rr2
+    slLine := line.new(bar_index, stop, bar_index + 20, stop, color = color.red,   width = 2)
+    t1Line := line.new(bar_index, tgt1, bar_index + 20, tgt1, color = color.green, width = 1, style = line.style_dashed)
+    t2Line := line.new(bar_index, tgt2, bar_index + 20, tgt2, color = color.green, width = 2)
+    entLbl := label.new(bar_index, entry, "LONG\n" + str.tostring(entry, format.mintick), style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white, size = size.small)
+
+if shortFire and drawRisk
+    f_clearRisk()
+    entry = close
+    stop  = flagHigh * (1 + stopPad / 100.0)
+    risk  = stop - entry
+    tgt1  = entry - risk * rr1
+    tgt2  = entry - risk * rr2
+    slLine := line.new(bar_index, stop, bar_index + 20, stop, color = color.red,   width = 2)
+    t1Line := line.new(bar_index, tgt1, bar_index + 20, tgt1, color = color.green, width = 1, style = line.style_dashed)
+    t2Line := line.new(bar_index, tgt2, bar_index + 20, tgt2, color = color.green, width = 2)
+    entLbl := label.new(bar_index, entry, "SHORT\n" + str.tostring(entry, format.mintick), style = label.style_label_down, color = color.new(color.red, 20), textcolor = color.white, size = size.small)
+
+// ============================ SESSION-LEVEL LABELS ==========================
+f_lvlLabel(_show, _price, _txt, _col) =>
+    var label _lb = na
+    if _show and not na(_price) and barstate.islast
+        if not na(_lb)
+            label.delete(_lb)
+        _lb := label.new(bar_index, _price, _txt + " " + str.tostring(_price, format.mintick), style = label.style_label_left, color = color.new(_col, 20), textcolor = color.white, size = size.small)
+
+f_lvlLabel(showLvlLabels and showPMH,  pmh,      "PMH", pmhCol)
+f_lvlLabel(showLvlLabels and showPML,  pml,      "PML", pmlCol)
+f_lvlLabel(showLvlLabels and showPDH,  pdh,      "PDH", pdhCol)
+f_lvlLabel(showLvlLabels and showPDL,  pdl,      "PDL", pdlCol)
+f_lvlLabel(showLvlLabels and showOpen, sessOpen, "OPEN", openCol)
+
+// ============================ PLOTS ==========================================
+fastPlotCol = tintFast ? (regime == 1 ? color.new(color.green, 0) : regime == -1 ? color.new(color.red, 0) : fastCol) : fastCol
+plot(showFast  ? emaFast  : na, "EMA 8",   color = fastPlotCol, linewidth = 2)
+plot(showMid   ? emaMid   : na, "EMA 21",  color = midCol,      linewidth = 1)
+plot(showSlow  ? emaSlow  : na, "EMA 50",  color = slowCol,     linewidth = 2)
+plot(showExtra ? emaExtra : na, "EMA 200", color = extraCol,    linewidth = 2)
+
+// Session reference levels
+plot(pmh,      "PMH",  color = na(pmh)      ? na : pmhCol,  style = plot.style_linebr, linewidth = 1)
+plot(pml,      "PML",  color = na(pml)      ? na : pmlCol,  style = plot.style_linebr, linewidth = 1)
+plot(pdh,      "PDH",  color = na(pdh)      ? na : pdhCol,  style = plot.style_linebr, linewidth = 1)
+plot(pdl,      "PDL",  color = na(pdl)      ? na : pdlCol,  style = plot.style_linebr, linewidth = 1)
+plot(sessOpen, "OPEN", color = na(sessOpen) ? na : openCol, style = plot.style_linebr, linewidth = 1)
+
+// Key level lines
+plot(longLevel,  "Support (long level)",     color = na(longLevel)  ? na : color.new(color.teal, 0),   style = plot.style_linebr, linewidth = 2)
+plot(shortLevel, "Resistance (short level)", color = na(shortLevel) ? na : color.new(color.maroon, 0), style = plot.style_linebr, linewidth = 2)
+
+// Regime background
+bgcolor(shadeRegime ? (regime == 1 ? color.new(color.green, 92) : regime == -1 ? color.new(color.red, 92) : na) : na)
+
+// Signal markers
+plotshape(longFire,  "LONG",  style = shape.triangleup,   location = location.belowbar, color = color.green, size = size.small, text = "LONG")
+plotshape(shortFire, "SHORT", style = shape.triangledown, location = location.abovebar, color = color.red,   size = size.small, text = "SHORT")
+
+// Reclaim markers (structure event, smaller)
+plotshape(longReclaim  and isBull, "Reclaim (long)",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 30),   size = size.tiny)
+plotshape(shortReclaim and isBear, "Reclaim (short)", style = shape.circle, location = location.abovebar, color = color.new(color.maroon, 30), size = size.tiny)
+
+// ============================ ALERTS =========================================
+alertcondition(longFire,  "Long Confluence",  "Reclaim+Flag+8EMA LONG confluence (bull regime)")
+alertcondition(shortFire, "Short Confluence", "Reclaim+Flag+8EMA SHORT confluence (bear regime)")
+alertcondition(longReclaim  or shortReclaim, "Level Reclaim", "Key level reclaimed — watch for flag")
+alertcondition(bullFlagNew, "Bull Flag Detected", "Bull flag formed (strong pole + tight pullback)")
+alertcondition(bearFlagNew, "Bear Flag Detected", "Bear flag formed (strong pole + tight bounce)")
+
+// ============================ DASHBOARD ======================================
+f_pos(p) =>
+    p == "Top Right" ? position.top_right : p == "Top Left" ? position.top_left : p == "Bottom Right" ? position.bottom_right : position.bottom_left
+
+f_yn(b) => b ? "YES" : "no"
+f_ynCol(b) => b ? color.new(color.green, 0) : color.new(color.gray, 40)
+
+var table dash = na
+if showTable and barstate.islast
+    if not na(dash)
+        table.delete(dash)
+    dash := table.new(f_pos(tblPos), 2, 9, border_width = 1, frame_color = color.new(color.gray, 60), frame_width = 1)
+
+    table.cell(dash, 0, 0, "CONFLUENCE", text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
+    table.cell(dash, 1, 0, regimeTxt,    text_color = color.white, bgcolor = color.new(regimeCol, 10), text_size = size.small)
+
+    // Which side are we evaluating for the checklist?
+    evalLong = regime >= 0
+    lvlVal   = evalLong ? longLevel : shortLevel
+    reclaimA = evalLong ? longReclaimActive  : shortReclaimActive
+    flagOk   = evalLong ? bullFlag : bearFlag
+    flagHold = evalLong ? flagHoldsLong : flagHoldsShort
+    momOk    = evalLong ? holdAboveFast : holdBelowFast
+
+    table.cell(dash, 0, 1, "Overall trend (21/50)", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 1, regimeTxt, text_color = color.white, bgcolor = color.new(regimeCol, 30), text_size = size.small)
+
+    table.cell(dash, 0, 2, "Level: " + levelSource, text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 2, na(lvlVal) ? "—" : str.tostring(lvlVal, format.mintick), text_color = color.white, bgcolor = f_ynCol(not na(lvlVal)), text_size = size.small)
+
+    table.cell(dash, 0, 3, "Reclaim active", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 3, f_yn(reclaimA), text_color = color.white, bgcolor = f_ynCol(reclaimA), text_size = size.small)
+
+    table.cell(dash, 0, 4, "Flag type", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 4, flagTypeTxt + (flagOk ? "  " + str.tostring(poleStrengthATR, "#.#") + "x" : ""), text_color = color.white, bgcolor = f_ynCol(flagOk), text_size = size.small)
+
+    table.cell(dash, 0, 5, "Flag tight coil", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 5, f_yn(isTight) + " " + str.tostring(flagRangePct, "#.#") + "%", text_color = color.white, bgcolor = f_ynCol(isTight), text_size = size.small)
+
+    table.cell(dash, 0, 6, "Flag holds level", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 6, f_yn(flagHold), text_color = color.white, bgcolor = f_ynCol(flagHold), text_size = size.small)
+
+    table.cell(dash, 0, 7, "8 EMA momentum", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 7, f_yn(momOk), text_color = color.white, bgcolor = f_ynCol(momOk), text_size = size.small)
+
+    ready = (evalLong ? longSetup : shortSetup)
+    table.cell(dash, 0, 8, "SETUP READY", text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
+    table.cell(dash, 1, 8, ready ? (evalLong ? "LONG" : "SHORT") : "wait", text_color = color.white, bgcolor = ready ? color.new(color.green, 0) : color.new(color.gray, 40), text_size = size.small)

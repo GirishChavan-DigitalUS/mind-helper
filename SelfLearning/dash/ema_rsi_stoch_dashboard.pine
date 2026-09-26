@@ -1,0 +1,209 @@
+//@version=6
+// =============================================================================
+//  EMA+RSI+Stoch Dashboard [5m]  —  Module 4 of 4 (Multi-Indicator Dashboard)
+//  Runs the "EMA + RSI + Stochastic Signal" logic across the fixed 8-ticker
+//  watchlist and renders a status table. Timeframe is LOCKED to 5m.
+//
+//  Signal (per source):
+//    BUY  = price above EMA-High + RSI > 50 + Stoch %K crossed up (not OB)
+//    SELL = price below EMA-Low  + RSI < 50 + Stoch %K crossed down (not OS)
+//  A/B/C grade from extra confluence (EMA stack, volume surge, 2nd-candle).
+//
+//  Normalised bias (shared across all 4 dashboard modules):
+//      +1 = LONG   -1 = SHORT   0 = NEUTRAL
+//    Bias latches to the last BUY/SELL signal and resets to NEUTRAL when price
+//    closes back through the opposite EMA band.
+// =============================================================================
+indicator("EMA+RSI+Stoch Dashboard [5m]", shorttitle="ERS Dash", overlay=true, dynamic_requests=true)
+
+// ============================ CONFIG =========================================
+FIXED_TF = "5"
+
+grpEMA = "EMA Settings"
+ema1_len  = input.int(25,  "EMA 1 Length", group = grpEMA)
+ema2_len  = input.int(75,  "EMA 2 Length", group = grpEMA)
+ema3_len  = input.int(145, "EMA 3 Length", group = grpEMA)
+ema_h_len = input.int(20,  "EMA High Length", group = grpEMA)
+ema_l_len = input.int(20,  "EMA Low Length",  group = grpEMA)
+
+grpRSI = "RSI / Stoch"
+rsi_len   = input.int(14, "RSI Length", group = grpRSI)
+stoch_k   = input.int(14, "%K Length",    group = grpRSI)
+stoch_d   = input.int(3,  "%D Smoothing", group = grpRSI)
+stoch_smo = input.int(3,  "%K Smoothing", group = grpRSI)
+stoch_ob  = input.int(80, "Overbought",   group = grpRSI)
+stoch_os  = input.int(20, "Oversold",     group = grpRSI)
+
+grpCandle = "Candle / Confluence"
+use_ha   = input.bool(true, "Use Heikinashi Candles for signal", group = grpCandle)
+vol_len  = input.int(20,   "Volume MA Length", group = grpCandle)
+vol_mult = input.float(1.2, "Volume Surge Multiplier", step = 0.1, group = grpCandle)
+
+grpSym = "Watchlist"
+symText = input.text_area("AMEX:SPY\nNASDAQ:QQQ\nAMEX:IWM\nNASDAQ:AAPL\nNASDAQ:GOOGL\nNASDAQ:NVDA\nNASDAQ:TSLA\nNASDAQ:MSFT", "Tickers (one per line or comma-separated)", group = grpSym)
+
+grpUI = "Dashboard"
+tblPos  = input.string("Bottom Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpUI)
+txtSize = input.string("Small", "Text Size", options = ["Tiny", "Small", "Normal"], group = grpUI)
+
+// ============================ PER-SYMBOL ENGINE ==============================
+// Returns: [bias(-1/0/1), signalNow(-1/0/1), rsi, kLine, gradeCode(0/1/2/3 - none/C/B/A), price]
+f_ers() =>
+    ha_close = (open + high + low + close) / 4
+    var float ha_open = na
+    ha_open := na(ha_open[1]) ? (open + close) / 2 : (ha_open[1] + ha_close[1]) / 2
+    ha_high = math.max(high, math.max(ha_open, ha_close))
+    ha_low  = math.min(low,  math.min(ha_open, ha_close))
+
+    src_close = use_ha ? ha_close : close
+    src_high  = use_ha ? ha_high  : high
+    src_low   = use_ha ? ha_low   : low
+
+    ema1  = ta.ema(src_close, ema1_len)
+    ema2  = ta.ema(src_close, ema2_len)
+    ema3  = ta.ema(src_close, ema3_len)
+    ema_h = ta.ema(high, ema_h_len)
+    ema_l = ta.ema(low,  ema_l_len)
+
+    rsi_val = ta.rsi(close, rsi_len)
+    stoch_raw = ta.stoch(src_close, src_high, src_low, stoch_k)
+    k_line = ta.sma(stoch_raw, stoch_smo)
+    d_line = ta.sma(k_line, stoch_d)
+    k_cross_up   = ta.crossover(k_line,  d_line)
+    k_cross_down = ta.crossunder(k_line, d_line)
+
+    price_above = src_close > ema_h
+    price_below = src_close < ema_l
+    rsi_bull = rsi_val > 50
+    rsi_bear = rsi_val < 50
+    stoch_from_below = k_cross_up   and k_line < stoch_ob
+    stoch_from_above = k_cross_down and k_line > stoch_os
+
+    buy_signal  = price_above and rsi_bull and stoch_from_below
+    sell_signal = price_below and rsi_bear and stoch_from_above
+
+    // confluence grade
+    vol_ma = ta.sma(volume, vol_len)
+    vol_surge = volume > vol_ma * vol_mult
+    ema_bull_stack = ema1 > ema2 and ema2 > ema3
+    ema_bear_stack = ema1 < ema2 and ema2 < ema3
+    buy_confirm  = close > close[1]
+    sell_confirm = close < close[1]
+    buy_cnt  = (ema_bull_stack ? 1 : 0) + (vol_surge ? 1 : 0) + (buy_confirm ? 1 : 0)
+    sell_cnt = (ema_bear_stack ? 1 : 0) + (vol_surge ? 1 : 0) + (sell_confirm ? 1 : 0)
+
+    int signalNow = buy_signal ? 1 : sell_signal ? -1 : 0
+    int gradeCode = 0
+    if buy_signal
+        gradeCode := buy_cnt >= 3 ? 3 : buy_cnt == 2 ? 2 : 1
+    else if sell_signal
+        gradeCode := sell_cnt >= 3 ? 3 : sell_cnt == 2 ? 2 : 1
+
+    // persistent latched bias
+    var int bias = 0
+    if buy_signal
+        bias := 1
+    else if sell_signal
+        bias := -1
+    else if bias == 1 and src_close < ema_l
+        bias := 0
+    else if bias == -1 and src_close > ema_h
+        bias := 0
+
+    [bias, signalNow, rsi_val, k_line, gradeCode, close]
+
+// ============================ PARSE WATCHLIST ================================
+f_parse(string raw) =>
+    tmp  = str.replace_all(raw, ",", "\n")
+    tmp2 = str.replace_all(tmp, "\r", "")
+    tmp3 = str.replace_all(tmp2, " ", "")
+    parts = str.split(tmp3, "\n")
+    out = array.new_string()
+    if array.size(parts) > 0
+        for i = 0 to array.size(parts) - 1
+            p = array.get(parts, i)
+            if str.length(p) > 0
+                array.push(out, str.upper(p))
+    out
+
+symbols = f_parse(symText)
+n = array.size(symbols)
+
+// ============================ FETCH (dynamic loop, LOCKED 5m) ================
+var names  = array.new_string()
+var biases = array.new_int()
+var sigs   = array.new_int()
+var rsis   = array.new_float()
+var ks     = array.new_float()
+var grades = array.new_int()
+var prices = array.new_float()
+
+array.clear(names)
+array.clear(biases)
+array.clear(sigs)
+array.clear(rsis)
+array.clear(ks)
+array.clear(grades)
+array.clear(prices)
+
+if n > 0
+    for i = 0 to n - 1
+        sym = array.get(symbols, i)
+        [b, sg, rsi, kl, gc, px] = request.security(sym, FIXED_TF, f_ers(), ignore_invalid_symbol = true)
+        array.push(names, sym)
+        array.push(biases, na(b) ? 0 : b)
+        array.push(sigs, na(sg) ? 0 : sg)
+        array.push(rsis, rsi)
+        array.push(ks, kl)
+        array.push(grades, na(gc) ? 0 : gc)
+        array.push(prices, px)
+
+// ============================ DASHBOARD HELPERS ==============================
+f_pos() =>
+    tblPos == "Top Left"     ? position.top_left     :
+     tblPos == "Bottom Right" ? position.bottom_right :
+     tblPos == "Bottom Left"  ? position.bottom_left  :
+     position.top_right
+
+f_size() =>
+    txtSize == "Tiny" ? size.tiny : txtSize == "Normal" ? size.normal : size.small
+
+f_cleanName(string s) =>
+    arr = str.split(s, ":")
+    array.size(arr) > 1 ? array.get(arr, 1) : s
+
+f_biasTxt(int b)  => b == 1 ? "LONG" : b == -1 ? "SHORT" : "-"
+f_biasCol(int b)  => b == 1 ? color.green : b == -1 ? color.red : color.gray
+f_gradeTxt(int g) => g == 3 ? "A" : g == 2 ? "B" : g == 1 ? "C" : "-"
+f_gradeCol(int g) => g == 3 ? color.green : g == 2 ? color.yellow : g == 1 ? color.orange : color.gray
+f_sigTxt(int s)   => s == 1 ? "◆BUY" : s == -1 ? "◆SELL" : "—"
+
+// ============================ RENDER DASHBOARD ===============================
+var table dash = na
+if barstate.islast
+    if not na(dash)
+        table.delete(dash)
+    rows = array.size(names) + 1
+    dash := table.new(f_pos(), 6, rows, border_width = 1, frame_color = color.gray, frame_width = 1)
+    hb = color.new(color.orange, 0)
+    table.cell(dash, 0, 0, "ERS 5m", text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 1, 0, "Pos",    text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 2, 0, "Signal", text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 3, 0, "RSI",    text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 4, 0, "%K",     text_color = color.white, bgcolor = hb, text_size = f_size())
+    table.cell(dash, 5, 0, "Grade",  text_color = color.white, bgcolor = hb, text_size = f_size())
+
+    if array.size(names) > 0
+        for i = 0 to array.size(names) - 1
+            r  = i + 1
+            b  = array.get(biases, i)
+            sg = array.get(sigs, i)
+            rsi= array.get(rsis, i)
+            kl = array.get(ks, i)
+            gc = array.get(grades, i)
+            table.cell(dash, 0, r, f_cleanName(array.get(names, i)), text_color = color.white, text_size = f_size())
+            table.cell(dash, 1, r, f_biasTxt(b), text_color = color.white, bgcolor = color.new(f_biasCol(b), 55), text_size = f_size())
+            table.cell(dash, 2, r, f_sigTxt(sg), text_color = sg == 1 ? color.green : sg == -1 ? color.red : color.gray, text_size = f_size())
+            table.cell(dash, 3, r, na(rsi) ? "n/a" : str.tostring(rsi, "#.#"), text_color = na(rsi) ? color.gray : rsi > 50 ? color.green : color.red, text_size = f_size())
+            table.cell(dash, 4, r, na(kl) ? "n/a" : str.tostring(kl, "#.#"), text_color = na(kl) ? color.gray : kl > 50 ? color.green : color.red, text_size = f_size())
+            table.cell(dash, 5, r, f_gradeTxt(gc), text_color = f_gradeCol(gc), text_size = f_size())
