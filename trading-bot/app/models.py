@@ -1,9 +1,8 @@
 """Typed data structures shared across the app."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
-from typing import Optional
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 
 
 @dataclass
@@ -13,10 +12,10 @@ class Signal:
     action: str            # "CALL" | "PUT"
     signal: str            # engine signal name, e.g. "ORB_BREAKOUT_UP"
     price: float           # underlying price at signal
-    atr: Optional[float] = None
-    tf: Optional[str] = None
-    bar_time: Optional[int] = None   # ms epoch of the signal bar
-    received_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    atr: float | None = None
+    tf: str | None = None
+    bar_time: int | None = None   # ms epoch of the signal bar
+    received_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def dedupe_key(self) -> str:
         return f"{self.ticker}|{self.signal}|{self.action}|{self.bar_time}"
@@ -73,7 +72,7 @@ class Position:
     realized_pnl: float = 0.0  # USD realized on this position so far
     last_mark: float = 0.0     # last observed option mid (drives unrealized P&L)
     signal: str = ""           # entry signal name
-    opened_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    opened_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     client_order_ids: list[str] = field(default_factory=list)
     exits: list[dict] = field(default_factory=list)  # per-leg exit records
 
@@ -97,7 +96,7 @@ class Position:
         return d
 
     @staticmethod
-    def from_dict(d: dict) -> "Position":
+    def from_dict(d: dict) -> Position:
         d = {k: v for k, v in d.items() if k not in ("unrealized_pnl", "unrealized_pct")}
         return Position(**d)
 
@@ -111,7 +110,7 @@ class AlertRecord:
     price: float
     accepted: bool
     reason: str
-    received_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    received_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict:
         return asdict(self)

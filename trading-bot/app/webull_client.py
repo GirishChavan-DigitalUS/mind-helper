@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import date, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from .config import Secrets
@@ -37,28 +37,41 @@ SIDE_BUY_OPEN = "BUY"
 SIDE_SELL_CLOSE = "SELL"
 
 
-def next_expiry(rule: str, tz: str = "America/New_York", now: Optional[datetime] = None) -> str:
+def past_local_time(hhmm: str, tz: str, now: datetime | None = None) -> bool:
+    """True if the wall-clock time in ``tz`` is at/after ``hhmm`` (HH:MM)."""
+    z = ZoneInfo(tz)
+    now = now.astimezone(z) if now else datetime.now(z)
+    h, m = (int(x) for x in hhmm.split(":"))
+    return (now.hour, now.minute) >= (h, m)
+
+
+def next_expiry(rule: str, tz: str = "America/New_York", now: datetime | None = None,
+                no_0dte_after: str | None = None, cutoff_tz: str | None = None) -> str:
     """Resolve an expiry date (YYYY-MM-DD) from a rule.
 
-    nearest_weekly  -> upcoming Friday (or today if today is Fri before close)
-    zero_dte        -> today
+    nearest_weekly  -> upcoming Friday (or today if today is Fri)
+    zero_dte        -> today (next weekday if weekend)
     nearest_monthly -> third Friday of the current or next month
+    After ``no_0dte_after`` (HH:MM in ``cutoff_tz``) today's expiry is excluded.
     """
     z = ZoneInfo(tz)
     now = now.astimezone(z) if now else datetime.now(z)
     d = now.date()
+    if no_0dte_after and past_local_time(no_0dte_after, cutoff_tz or tz, now):
+        d += timedelta(days=1)
     if rule == "zero_dte":
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
         return d.isoformat()
     if rule == "nearest_monthly":
-        return _third_friday(now).isoformat()
+        return _third_friday(d).isoformat()
     # nearest_weekly (default)
     ahead = (4 - d.weekday()) % 7          # Friday == 4
     friday = d + timedelta(days=ahead)
     return friday.isoformat()
 
 
-def _third_friday(now: datetime):
-    from calendar import monthrange
+def _third_friday(now: date):
     year, month = now.year, now.month
     first_wd = datetime(year, month, 1).weekday()
     first_friday = 1 + ((4 - first_wd) % 7)
@@ -93,8 +106,8 @@ class WebullClient:
         # (real-time data, no broker orders) modes; only true-live submits.
         self._simulate_orders = self.dry_run or self.shadow
         self.account_id = secrets.account_id or ""
-        self._trade = None                        # webull.trade.trade_client.TradeClient
-        self._data = None                         # webull.data.data_client.DataClient
+        self._trade: Any = None                   # webull.trade.trade_client.TradeClient
+        self._data: Any = None                    # webull.data.data_client.DataClient
         self._sim_prices: dict[str, float] = {}   # option_symbol -> simulated mid
 
     # ------------------------------------------------------------------ auth
@@ -104,9 +117,9 @@ class WebullClient:
             if not self.account_id:
                 self.account_id = "PAPER-SIM"
             return
-        from webull.core.client import ApiClient          # type: ignore
+        from webull.core.client import ApiClient  # type: ignore
+        from webull.data.data_client import DataClient  # type: ignore
         from webull.trade.trade_client import TradeClient  # type: ignore
-        from webull.data.data_client import DataClient     # type: ignore
 
         api_client = ApiClient(self._s.app_key, self._s.app_secret, self._s.region)
         if self._s.api_endpoint:
@@ -150,9 +163,10 @@ class WebullClient:
 
     # -------------------------------------------------------------- contracts
     def select_contract(self, underlying: str, action: str, price: float,
-                        expiry_rule: str, tz: str) -> OptionContract:
+                        expiry_rule: str, tz: str, no_0dte_after: str | None = None,
+                        cutoff_tz: str | None = None) -> OptionContract:
         """Pick the 1 ATM contract for the given side and nearest expiry."""
-        expiry = next_expiry(expiry_rule, tz)
+        expiry = next_expiry(expiry_rule, tz, no_0dte_after=no_0dte_after, cutoff_tz=cutoff_tz)
         right = "CALL" if action.upper() == "CALL" else "PUT"
         if self.dry_run:
             inc = _strike_increment(price)
@@ -210,7 +224,7 @@ class WebullClient:
     def _occ_symbol(underlying: str, expiry: str, right: str, strike: float) -> str:
         y, m, d = expiry.split("-")
         cp = "C" if right == "CALL" else "P"
-        return f"{underlying}{y[2:]}{m}{d}{cp}{int(round(strike * 1000)):08d}"
+        return f"{underlying}{y[2:]}{m}{d}{cp}{round(strike * 1000):08d}"
 
     # ------------------------------------------------------------------ quotes
     def get_quote(self, contract: OptionContract) -> Quote:
@@ -244,7 +258,7 @@ class WebullClient:
         try:
             q = self.get_quote(contract)
             return round((q.bid + q.ask) / 2, 2)
-        except Exception:
+        except Exception:  # noqa: BLE001 - any quote failure falls back to an estimate
             return limit_price or 1.0
 
     # ------------------------------------------------------------------ orders

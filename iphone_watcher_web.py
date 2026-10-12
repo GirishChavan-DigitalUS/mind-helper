@@ -15,6 +15,7 @@ Open:
 import threading
 import time
 from datetime import datetime
+from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, render_template_string
@@ -31,7 +32,7 @@ _lock = threading.Lock()
 _refresh_lock = threading.Lock()
 # Product name -> store names that had pickup stock on the last successful check.
 _last_stores: dict[str, set[str]] = {}
-_status = {
+_status: dict[str, Any] = {
     "zip": w.ZIP_CODE,
     "interval": REFRESH_SECONDS,
     "last_checked": None,
@@ -48,7 +49,7 @@ def _check_with_retry(name: str, part: str) -> list[dict]:
     # Apple intermittently answers 541 under repeated polling; one delayed retry usually succeeds.
     try:
         return w.check_product(name, part)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - retry once on any failure
         w.log.warning(f"{name}: check failed ({e}), retrying in {RETRY_DELAY_SECONDS}s")
         time.sleep(RETRY_DELAY_SECONDS)
         return w.check_product(name, part)
@@ -61,7 +62,7 @@ def _refresh() -> None:
     results = []
     for name, part in w.PRODUCTS.items():
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        entry = {
+        entry: dict[str, Any] = {
             "name": name,
             "part": part,
             "buy_url": f"https://www.apple.com/{w.COUNTRY}/shop/product/{part}",
@@ -72,7 +73,7 @@ def _refresh() -> None:
         try:
             entry["stores"] = _check_with_retry(name, part)
             entry["updated"] = now
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - keep last known stock on any failure
             entry["error"] = str(e)
             w.log.error(f"{name}: check failed after retry ({e})")
             prev = previous.get(name)

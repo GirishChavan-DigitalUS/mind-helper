@@ -15,11 +15,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from .models import OptionContract, Position, Quote
 from .state import StateStore
-from .webull_client import SIDE_SELL_CLOSE, WebullClient
+from .webull_client import SIDE_SELL_CLOSE, WebullClient, past_local_time
 
 log = logging.getLogger("exits")
 
@@ -63,11 +64,16 @@ class ExitEngine:
                 log.exception("exit cycle error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     # ------------------------------------------------------------------ cycle
     def run_once(self, params: dict) -> None:
+        sess = params.get("session", {})
+        eod = sess.get("eod_flatten_at")
+        local_tz = sess.get("local_timezone", "America/Chicago")
+        flatten = (bool(eod) and datetime.now(ZoneInfo(local_tz)).weekday() < 5
+                   and past_local_time(eod, local_tz))
         for symbol in list(self.state.positions.keys()):
             pos = self.state.get(symbol)
             if not pos or pos.contracts_open <= 0:
@@ -78,7 +84,22 @@ class ExitEngine:
             if quote.mid > 0 and abs(pos.last_mark - quote.mid) > 1e-9:
                 pos.last_mark = quote.mid
                 self.state.save()
+            if flatten:
+                self._close(pos, pos.contracts_open, quote.mid if quote.mid > 0 else pos.last_mark,
+                            f"EOD flatten {eod} {local_tz}")
+                continue
             self._evaluate(pos, quote, params)
+
+    def close_position(self, symbol: str, reason: str) -> bool:
+        """Close all open contracts for ``symbol``; False if nothing to close."""
+        pos = self.state.get(symbol)
+        if not pos or pos.contracts_open <= 0:
+            return False
+        contract = OptionContract(pos.underlying, pos.option_symbol,
+                                pos.action, pos.strike, pos.expiry)
+        quote = self.client.get_quote(contract)
+        self._close(pos, pos.contracts_open, quote.mid if quote.mid > 0 else pos.last_mark, reason)
+        return True
 
     def _evaluate(self, pos: Position, quote: Quote, params: dict) -> None:
         cfg = params.get("exit", {})
@@ -152,7 +173,7 @@ class ExitEngine:
             "price": round(fill, 4),
             "reason": reason,
             "realized": round(realized, 2),
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
         })
         self.state.record_realized(pos.underlying, realized)
         log.info("EXIT %s %s x%d @%.2f | %s | realized $%.2f | open=%d",

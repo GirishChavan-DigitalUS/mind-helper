@@ -1,4 +1,4 @@
-"""Read-only live Webull auth check (NO orders placed).
+r"""Read-only live Webull auth check (NO orders placed).
 
 Confirms, against the real (sandbox/paper) Webull OpenAPI, exactly what your
 app key + account can do BEFORE relying on it during market hours:
@@ -25,7 +25,7 @@ Interpreting results:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.config import load_secrets
 
@@ -43,7 +43,7 @@ def _as_json(res) -> object:
     if hasattr(res, "json"):
         try:
             return res.json()
-        except Exception:  # noqa: BLE001 - fall through to text
+        except Exception:  # noqa: BLE001, S110 - fall through to text
             pass
     return getattr(res, "text", res)
 
@@ -74,8 +74,8 @@ def main() -> int:
     # --- 1) authenticate -----------------------------------------------------
     try:
         from webull.core.client import ApiClient
-        from webull.trade.trade_client import TradeClient
         from webull.data.data_client import DataClient
+        from webull.trade.trade_client import TradeClient
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR importing Webull SDK: {exc!r}")
         print("Is the venv active / is webull-openapi-python-sdk installed?")
@@ -160,7 +160,7 @@ def main() -> int:
             if delay is not None:
                 verdict = "REAL-TIME" if delay == 0 else f"DELAYED by {delay} min"
                 print(f"    >>> delay_minutes = {delay}  =>  {verdict}")
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             stamps = _find_timestamps(body)
             if stamps:
                 print("    --- quote timestamps (field -> age vs now) ---")
@@ -221,7 +221,7 @@ def _parse_dt(v):
             if n > 1e12:      # milliseconds
                 n /= 1000.0
             if 1e9 < n < 4e9:  # plausible epoch seconds (2001..2096)
-                return _dt.fromtimestamp(n, tz=timezone.utc)
+                return _dt.fromtimestamp(n, tz=UTC)
             return None
     except (TypeError, ValueError, OverflowError, OSError):
         return None
@@ -230,7 +230,7 @@ def _parse_dt(v):
         s = v.strip().replace("Z", "+00:00")
         try:
             dt = _dt.fromisoformat(s)
-            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
         except ValueError:
             return None
     return None

@@ -21,7 +21,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 
 from .config import load_params, load_secrets
-from .models import AlertRecord, Position, Signal
+from .models import AlertRecord, Signal
 from .order_events import OrderEventSubscriber
 from .position_manager import ExitEngine
 from .state import StateStore
@@ -198,7 +198,7 @@ async def webhook(request: Request) -> Response:
 
     # ---- auth: constant-time shared-secret check (body field or header) ----
     provided = str(payload.get("secret", "")) or request.headers.get("X-Webhook-Secret", "")
-    if not SECRETS.webhook_secret or not hmac.compare_digest(provided, SECRETS.webhook_secret):
+    if not _secret_ok(provided):
         log.warning("rejected webhook: bad secret from %s", request.client.host if request.client else "?")
         return _json({"accepted": False, "reason": "unauthorized"}, 401)
 
@@ -218,7 +218,30 @@ async def webhook(request: Request) -> Response:
     result = STRATEGY.handle_signal(sig, params)
     STATE.record_alert(AlertRecord(sig.ticker, sig.action, sig.signal,
                                    sig.price, result.accepted, result.reason))
-    return _json(result.as_dict(), 200 if result.accepted else 200)
+    return _json(result.as_dict(), 200)
+
+
+# async so it runs on the event loop and never interleaves with the exit engine
+@app.post("/api/positions/{symbol}/close")
+async def close_position(symbol: str, request: Request) -> Response:
+    if not _secret_ok(request.headers.get("X-Webhook-Secret", "")):
+        log.warning("rejected manual close: bad secret from %s",
+                    request.client.host if request.client else "?")
+        return _json({"closed": False, "reason": "unauthorized"}, 401)
+    sym = symbol.upper()
+    try:
+        closed = ENGINE.close_position(sym, "MANUAL close")
+    except Exception:
+        log.exception("manual close failed for %s", sym)
+        return _json({"closed": False, "reason": "close failed; see server log"}, 500)
+    if not closed:
+        return _json({"closed": False, "reason": f"no open position for {sym}"}, 404)
+    return _json({"closed": True, "symbol": sym}, 200)
+
+
+def _secret_ok(provided: str) -> bool:
+    secret = SECRETS.webhook_secret
+    return bool(secret) and hmac.compare_digest(provided.encode(), secret.encode())
 
 
 def _json(obj: dict, status: int) -> Response:

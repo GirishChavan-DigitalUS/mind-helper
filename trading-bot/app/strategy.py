@@ -3,18 +3,18 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from .models import Position, Signal
 from .state import StateStore
-from .webull_client import SIDE_BUY_OPEN, WebullClient
+from .webull_client import SIDE_BUY_OPEN, WebullClient, past_local_time
 
 log = logging.getLogger("strategy")
 
 
 class EntryResult:
-    def __init__(self, accepted: bool, reason: str, position: Optional[Position] = None) -> None:
+    def __init__(self, accepted: bool, reason: str, position: Position | None = None) -> None:
         self.accepted = accepted
         self.reason = reason
         self.position = position
@@ -47,7 +47,7 @@ class Strategy:
         h, m = s.split(":")
         return int(h), int(m)
 
-    def check_gates(self, sig: Signal, params: dict) -> Optional[str]:
+    def check_gates(self, sig: Signal, params: dict) -> str | None:
         """Return a rejection reason, or None if the signal may proceed."""
         universe = {u.upper() for u in params.get("universe", [])}
         if sig.ticker.upper() not in universe:
@@ -55,6 +55,11 @@ class Strategy:
         risk = params.get("risk", {})
         if risk.get("rth_only", True) and not self._is_rth(params):
             return "outside regular trading hours"
+        sess = params.get("session", {})
+        eod = sess.get("eod_flatten_at")
+        local_tz = sess.get("local_timezone", "America/Chicago")
+        if eod and past_local_time(eod, local_tz):
+            return f"past EOD flatten time ({eod} {local_tz})"
         self.state.roll_day_if_needed()
         max_loss = float(risk.get("max_daily_loss", 0) or 0)
         if max_loss > 0 and self.state.daily_pnl <= -abs(max_loss):
@@ -75,7 +80,8 @@ class Strategy:
 
         contract_cfg = params.get("contract", {})
         entry_cfg = params.get("entry", {})
-        tz = params.get("session", {}).get("timezone", "America/New_York")
+        sess = params.get("session", {})
+        tz = sess.get("timezone", "America/New_York")
 
         contract = self.client.select_contract(
             underlying=sig.ticker.upper(),
@@ -83,6 +89,8 @@ class Strategy:
             price=sig.price,
             expiry_rule=contract_cfg.get("expiry", "nearest_weekly"),
             tz=tz,
+            no_0dte_after=sess.get("no_0dte_after"),
+            cutoff_tz=sess.get("local_timezone", "America/Chicago"),
         )
         quote = self.client.get_quote(contract)
 

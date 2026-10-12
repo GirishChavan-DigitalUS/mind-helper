@@ -37,11 +37,10 @@ subscribe to the topic name you set below, and you'll get a push the instant
 stock appears.
 """
 
-import time
 import logging
-import requests
 from datetime import datetime
 
+import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 # ============================== CONFIG ======================================
@@ -155,7 +154,7 @@ def notify(subject: str, body: str, priority: str = "urgent",
                 server.starttls()
                 server.login(EMAIL_FROM, EMAIL_APP_PASSWORD)
                 server.send_message(msg)
-        except Exception as e:
+        except (smtplib.SMTPException, OSError) as e:
             log.warning(f"email send failed, falling back to console: {e}")
             log.info(f"🔔 {subject}\n{body}")
 
@@ -165,7 +164,7 @@ def run_check() -> None:
     for name, part_number in PRODUCTS.items():
         try:
             stores = check_product(name, part_number)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - one bad product must not stop the loop
             log.error(f"[{ts}] {name}: check failed ({e})")
             continue
 

@@ -9,9 +9,8 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Optional
 
 from .models import AlertRecord, Position, TradeRecord
 
@@ -87,7 +86,7 @@ class StateStore:
             self.positions[pos.underlying] = pos
             self._flush()
 
-    def get(self, symbol: str) -> Optional[Position]:
+    def get(self, symbol: str) -> Position | None:
         return self.positions.get(symbol)
 
     def has(self, symbol: str) -> bool:
@@ -125,7 +124,7 @@ class StateStore:
                 realized_pnl=round(pos.realized_pnl, 2),
                 signal=pos.signal,
                 opened_at=pos.opened_at,
-                closed_at=datetime.now(timezone.utc).isoformat(),
+                closed_at=datetime.now(UTC).isoformat(),
                 exits=list(pos.exits),
             )
             self.closed_trades.insert(0, trade.to_dict())

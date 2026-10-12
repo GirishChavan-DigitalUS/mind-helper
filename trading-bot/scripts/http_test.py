@@ -7,17 +7,17 @@ Run:  python -m scripts.http_test
 """
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
-
 import app.main as m
+from fastapi.testclient import TestClient
 
 SECRET = m.SECRETS.webhook_secret
 
 # Disable the RTH gate for a deterministic test regardless of wall-clock time.
 _orig = m.load_params
-def _params_no_rth():
-    p = _orig()
+def _params_no_rth(*args, **kwargs):
+    p = _orig(*args, **kwargs)
     p.setdefault("risk", {})["rth_only"] = False
+    p.setdefault("session", {}).pop("eod_flatten_at", None)
     return p
 m.load_params = _params_no_rth
 

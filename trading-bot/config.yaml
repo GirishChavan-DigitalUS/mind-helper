@@ -55,6 +55,9 @@ session:
   timezone: America/New_York
   rth_start: "09:30"
   rth_end: "16:00"
+  local_timezone: America/Chicago   # timezone for the two cutoffs below
+  no_0dte_after: "12:00"            # after this, same-day expiry is skipped -> next expiry date
+  eod_flatten_at: "14:59"           # close all open positions and block new entries
 
 webull:
   region: us

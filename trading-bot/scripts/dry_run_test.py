@@ -36,6 +36,7 @@ def _tmp_state():
 def _params_no_rth():
     p = load_params()
     p.setdefault("risk", {})["rth_only"] = False  # allow entry any time in test
+    p.setdefault("session", {}).pop("eod_flatten_at", None)
     return p
 
 
@@ -94,7 +95,7 @@ def test_stop_loss():
 
 
 def test_spread_gate():
-    client, state, strat, engine = _fresh()
+    _client, state, strat, _engine = _fresh()
     state.positions.clear()
     params = _params_no_rth()
     params["entry"]["max_spread_pct"] = 1.0  # force rejection (sim spread ~3%)

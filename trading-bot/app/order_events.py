@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional
 
 from .config import Secrets
 from .state import StateStore
@@ -23,7 +22,7 @@ class OrderEventSubscriber:
     def __init__(self, secrets: Secrets, state: StateStore) -> None:
         self._s = secrets
         self._state = state
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._client = None
 
     def start(self) -> None:
@@ -36,10 +35,11 @@ class OrderEventSubscriber:
 
     def _run(self) -> None:
         try:
-            from webull.trade.trade_events_client import TradeEventsClient  # type: ignore
             from webull.trade.events.types import (  # type: ignore
-                ORDER_STATUS_CHANGED, EVENT_TYPE_ORDER,
+                EVENT_TYPE_ORDER,
+                ORDER_STATUS_CHANGED,
             )
+            from webull.trade.trade_events_client import TradeEventsClient  # type: ignore
         except Exception:
             log.exception("order-event SDK unavailable; live fills will use estimates")
             return

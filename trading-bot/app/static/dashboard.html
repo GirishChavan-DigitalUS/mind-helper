@@ -77,6 +77,10 @@
   .lvl .s { font-size: .68rem; margin-top: 3px; }
   .lvl.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px rgba(88,166,255,.35); }
   .done { color: var(--green); } .pend { color: var(--muted); }
+  .btn-close { font: inherit; font-size: .72rem; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+    color: var(--red); background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.45); }
+  .btn-close:hover { background: rgba(248,81,73,.25); }
+  .btn-close:disabled { opacity: .5; cursor: wait; }
 </style>
 </head>
 <body>
@@ -100,7 +104,7 @@
         <thead><tr>
           <th>Symbol</th><th>Side</th><th>Contract</th><th class="mono">Basis</th>
           <th class="mono">Mark</th><th class="mono">Open</th><th class="mono">Unreal $</th>
-          <th class="mono">Unreal %</th><th class="mono">Realized $</th><th>Stage</th><th>Signal</th>
+          <th class="mono">Unreal %</th><th class="mono">Realized $</th><th>Stage</th><th>Signal</th><th></th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -184,7 +188,7 @@ function renderOpen(list){
   LAST_POS = list;
   document.getElementById('c-open').textContent = list.length;
   const tb = document.querySelector('#t-open tbody');
-  if(!list.length){ tb.innerHTML = `<tr><td colspan="11" class="empty">No open positions</td></tr>`; return; }
+  if(!list.length){ tb.innerHTML = `<tr><td colspan="12" class="empty">No open positions</td></tr>`; return; }
   tb.innerHTML = list.map(p=>{
     const filled = p.contracts_total ? (1 - p.contracts_open/p.contracts_total)*100 : 0;
     const barColor = p.unrealized_pnl>=0 ? 'var(--green)':'var(--red)';
@@ -201,8 +205,9 @@ function renderOpen(list){
       <td class="mono ${cls(p.realized_pnl)}">${money(p.realized_pnl)}</td>
       <td>${stage(p)}<div class="bar"><span style="width:${filled}%;background:${barColor}"></span></div></td>
       <td class="muted">${p.signal||'—'}</td>
+      <td><button class="btn-close" data-sym="${p.underlying}">Close</button></td>
     </tr>`;
-    const detail = open ? `<tr class="detail"><td colspan="11">${detailHTML(p)}</td></tr>` : '';
+    const detail = open ? `<tr class="detail"><td colspan="12">${detailHTML(p)}</td></tr>` : '';
     return row + detail;
   }).join('');
 }
@@ -292,14 +297,39 @@ async function tick(){
   }
 }
 
-// Expand/collapse SL & TP details on click of an open-position row.
+// Expand/collapse SL & TP details on click of an open-position row; Close button closes it.
 document.querySelector('#t-open tbody').addEventListener('click', e => {
+  const btn = e.target.closest('button.btn-close');
+  if(btn){ closePos(btn.dataset.sym, btn); return; }
   const row = e.target.closest('tr.pos-row');
   if(!row) return;
   const sym = row.dataset.sym;
   if(EXPANDED.has(sym)) EXPANDED.delete(sym); else EXPANDED.add(sym);
   renderOpen(LAST_POS);
 });
+
+let CLOSE_SECRET = '';          // kept in memory only; asked once per page load
+
+async function closePos(sym, btn){
+  if(!confirm(`Close ALL open contracts for ${sym} now?`)) return;
+  if(!CLOSE_SECRET){
+    CLOSE_SECRET = prompt('Webhook secret (required to close positions):') || '';
+    if(!CLOSE_SECRET) return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/positions/${encodeURIComponent(sym)}/close`,
+      {method:'POST', headers:{'X-Webhook-Secret': CLOSE_SECRET}});
+    const d = await r.json().catch(() => ({}));
+    if(r.status === 401){ CLOSE_SECRET = ''; alert('Unauthorized: wrong secret'); }
+    else if(!r.ok){ alert('Close failed: ' + (d.reason || ('HTTP ' + r.status))); }
+  } catch(e){
+    alert('Close failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    tick();
+  }
+}
 
 // Countdown to the next auto-refresh.
 setInterval(() => {
